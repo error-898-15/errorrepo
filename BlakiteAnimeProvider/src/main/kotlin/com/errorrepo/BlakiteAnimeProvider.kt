@@ -8,8 +8,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import java.net.URLDecoder
 
 class BlakiteAnimeProvider : MainAPI() {
@@ -27,7 +25,6 @@ class BlakiteAnimeProvider : MainAPI() {
     private val apiBase = "https://blakiteapi.xyz"
     private val cdnBase = "https://hugh.cdn.rumble.cloud/video/"
     private val mapper = jacksonObjectMapper()
-    private val catalogMutex = Mutex()
 
     private val apiHeaders = mapOf(
         "Referer" to "$mainUrl/",
@@ -81,51 +78,46 @@ class BlakiteAnimeProvider : MainAPI() {
 
     private suspend fun getCatalog(): List<CatalogEntry> {
         val now = System.currentTimeMillis()
-        if (cachedCatalog.isNotEmpty() && (now - lastCatalogFetchMs) < cacheTtlMs) {
-            return cachedCatalog
+        val existing = cachedCatalog
+        if (existing.isNotEmpty() && (now - lastCatalogFetchMs) < cacheTtlMs) {
+            return existing
         }
 
-        return catalogMutex.withLock {
-            val recheckNow = System.currentTimeMillis()
-            if (cachedCatalog.isNotEmpty() && (recheckNow - lastCatalogFetchMs) < cacheTtlMs) {
-                return@withLock cachedCatalog
-            }
-
-            val responseText = try {
-                app.get("$apiBase/api/getAllAnime.php", headers = apiHeaders).text
-            } catch (_: Exception) {
-                return@withLock cachedCatalog
-            }
-
-            val root = try {
-                mapper.readTree(responseText)
-            } catch (_: Exception) {
-                return@withLock cachedCatalog
-            }
-
-            val dataNode = root.path("data")
-            if (dataNode.isMissingNode || !dataNode.isObject) {
-                return@withLock cachedCatalog
-            }
-
-            val parsed = mutableListOf<CatalogEntry>()
-            for (categoryKey in listOf("movies", "series", "dramas")) {
-                val bucket = dataNode.path(categoryKey)
-                if (!bucket.isObject) continue
-                val fields = bucket.fields()
-                while (fields.hasNext()) {
-                    val (key, node) = fields.next()
-                    parseCatalogEntry(key, categoryKey, node)?.let { parsed.add(it) }
-                }
-            }
-
-            parsed.sortByDescending { it.sortTimestamp }
-            if (parsed.isNotEmpty()) {
-                cachedCatalog = parsed
-                lastCatalogFetchMs = System.currentTimeMillis()
-            }
-            parsed
+        val responseText = try {
+            app.get("$apiBase/api/getAllAnime.php", headers = apiHeaders).text
+        } catch (_: Exception) {
+            return existing
         }
+
+        val root = try {
+            mapper.readTree(responseText)
+        } catch (_: Exception) {
+            return existing
+        }
+
+        val dataNode = root.path("data")
+        if (dataNode.isMissingNode || !dataNode.isObject) {
+            return existing
+        }
+
+        val parsed = mutableListOf<CatalogEntry>()
+        for (categoryKey in listOf("movies", "series", "dramas")) {
+            val bucket = dataNode.path(categoryKey)
+            if (!bucket.isObject) continue
+            val fields = bucket.fields()
+            while (fields.hasNext()) {
+                val entry = fields.next()
+                parseCatalogEntry(entry.key, categoryKey, entry.value)?.let { parsed.add(it) }
+            }
+        }
+
+        val sorted = parsed.sortedByDescending { it.sortTimestamp }
+        if (sorted.isNotEmpty()) {
+            cachedCatalog = sorted
+            lastCatalogFetchMs = System.currentTimeMillis()
+            return sorted
+        }
+        return existing
     }
 
     private fun parseCatalogEntry(
