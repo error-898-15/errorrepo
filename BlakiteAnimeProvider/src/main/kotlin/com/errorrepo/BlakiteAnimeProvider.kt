@@ -334,7 +334,7 @@ class BlakiteAnimeProvider : MainAPI() {
                 score = parsedScore
                 tags = entry.genres.takeIf { it.isNotEmpty() }
                 recommendations = recs
-                addTrailer(entry.trailer)
+                entry.trailer?.takeIf { it.isNotBlank() }?.let { addTrailer(listOf(it)) }
             }
         }
 
@@ -343,12 +343,16 @@ class BlakiteAnimeProvider : MainAPI() {
             for (epNum in 1..seasonInfo.totalEpisodes) {
                 val epData = "Series|${entry.id}|${seasonNum}-${epNum}"
                 episodes.add(
-                    newEpisode(epData) {
-                        name = "Episode $epNum"
-                        season = seasonNum
-                        episode = epNum
-                        posterUrl = entry.backdrop ?: entry.poster
-                    }
+                    newEpisode(
+                        url = epData,
+                        fix = false,
+                        initializer = {
+                            name = "Episode $epNum"
+                            season = seasonNum
+                            episode = epNum
+                            posterUrl = entry.backdrop ?: entry.poster
+                        }
+                    )
                 )
             }
         }
@@ -373,7 +377,7 @@ class BlakiteAnimeProvider : MainAPI() {
                 tags = entry.genres.takeIf { it.isNotEmpty() }
                 showStatus = resolvedStatus
                 recommendations = recs
-                addTrailer(entry.trailer)
+                entry.trailer?.takeIf { it.isNotBlank() }?.let { addTrailer(listOf(it)) }
             }
         }
 
@@ -387,7 +391,7 @@ class BlakiteAnimeProvider : MainAPI() {
             tags = entry.genres.takeIf { it.isNotEmpty() }
             showStatus = resolvedStatus
             recommendations = recs
-            addTrailer(entry.trailer)
+            entry.trailer?.takeIf { it.isNotBlank() }?.let { addTrailer(listOf(it)) }
             addEpisodes(dubStatus, episodes)
         }
     }
@@ -435,14 +439,14 @@ class BlakiteAnimeProvider : MainAPI() {
                 newExtractorLink(
                     source = name,
                     name = "$name$langSuffix",
-                    url = directVideoUrl
-                ) {
-                    this.referer = "$apiBase/"
-                    this.type = if (directVideoUrl.contains(".m3u8", ignoreCase = true)) {
+                    url = directVideoUrl,
+                    type = if (directVideoUrl.contains(".m3u8", ignoreCase = true)) {
                         ExtractorLinkType.M3U8
                     } else {
                         ExtractorLinkType.VIDEO
                     }
+                ) {
+                    this.referer = "$apiBase/"
                 }
             )
             return true
@@ -485,9 +489,9 @@ class BlakiteAnimeProvider : MainAPI() {
                     newExtractorLink(
                         source = name,
                         name = "$name $label$langSuffix",
-                        url = m3u8Url
+                        url = m3u8Url,
+                        type = ExtractorLinkType.M3U8
                     ) {
-                        this.type = ExtractorLinkType.M3U8
                         this.quality = getQualityFromName(label)
                         this.referer = "$apiBase/"
                     }
@@ -505,9 +509,9 @@ class BlakiteAnimeProvider : MainAPI() {
                     newExtractorLink(
                         source = name,
                         name = "$name $label$langSuffix",
-                        url = mp4Url
+                        url = mp4Url,
+                        type = ExtractorLinkType.VIDEO
                     ) {
-                        this.type = ExtractorLinkType.VIDEO
                         this.quality = getQualityFromName(label)
                         this.referer = "$apiBase/"
                     }
