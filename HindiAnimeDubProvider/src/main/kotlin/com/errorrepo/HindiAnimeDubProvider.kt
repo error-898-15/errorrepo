@@ -1,5 +1,6 @@
 package com.errorrepo
 
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -447,11 +448,11 @@ class HindiAnimeDubProvider : MainAPI() {
         }
 
         // Also inspect any direct/lazy iframe rendered on the watch page
-        doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
+        for (iframe in doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]")) {
             val rawIframeUrl = iframe.attr("data-litespeed-src").trim()
                 .ifBlank { iframe.attr("data-src").trim() }
                 .ifBlank { iframe.attr("src").trim() }
-            val iframeUrl = normalizeEmbedUrl(rawIframeUrl) ?: return@forEach
+            val iframeUrl = normalizeEmbedUrl(rawIframeUrl) ?: continue
             if (seenEmbedUrls.add(iframeUrl)) {
                 if (extractEmbedUrl(iframeUrl, name, watchUrl, subtitleCallback, callback, depth = 0)) {
                     foundAny = true
@@ -537,8 +538,8 @@ class HindiAnimeDubProvider : MainAPI() {
         }
         if (!arrayNode.isArray) return false
         var found = false
-        arrayNode.forEach { item ->
-            val link = normalizeEmbedUrl(item.path("link").asText("")) ?: return@forEach
+        for (item in arrayNode) {
+            val link = normalizeEmbedUrl(item.path("link").asText("")) ?: continue
             val lang = item.path("language").asText("").trim()
             val label = if (lang.isNotBlank()) "$serverLabel ($lang)" else serverLabel
             if (extractEmbedUrl(link, label, embedUrl, subtitleCallback, callback, depth + 1)) {
@@ -599,7 +600,7 @@ class HindiAnimeDubProvider : MainAPI() {
             }
         )
 
-        root.path("subtitles").forEach { sub ->
+        for (sub in root.path("subtitles")) {
             val subUrl = sub.path("file_path").asText("").trim()
             val subLang = sub.path("language").asText("English").trim()
             if (subUrl.startsWith("http")) {
@@ -629,15 +630,13 @@ class HindiAnimeDubProvider : MainAPI() {
         val embedOrigin = extractOrigin(embedUrl) ?: blakiteApiBase
 
         // blakiteapi.xyz enforces same-origin Referer matching the API host (e.g. test.blakiteapi.xyz vs blakiteapi.xyz)
-        val candidates = buildList {
-            add(Triple(embedOrigin, embedUrl, embedOrigin))
-            if (!embedOrigin.equals(blakiteApiBase, ignoreCase = true)) {
-                add(Triple(blakiteApiBase, "$blakiteApiBase/embed/$afterEmbed", blakiteApiBase))
-            }
+        val candidates = mutableListOf(Triple(embedOrigin, embedUrl, embedOrigin))
+        if (!embedOrigin.equals(blakiteApiBase, ignoreCase = true)) {
+            candidates.add(Triple(blakiteApiBase, "$blakiteApiBase/embed/$afterEmbed", blakiteApiBase))
         }
 
         var resolvedOrigin = embedOrigin
-        var streamData: com.fasterxml.jackson.databind.JsonNode? = null
+        var streamData: JsonNode? = null
         for ((apiHost, refUrl, originHeader) in candidates) {
             val apiUrl = if (episodeKey.isNullOrBlank()) {
                 "$apiHost/api/get.php?tmdbId=$tmdbId"
@@ -811,7 +810,7 @@ class HindiAnimeDubProvider : MainAPI() {
 
         val sourcesArray = root.path("videoSources")
         if (!emitted && sourcesArray.isArray) {
-            sourcesArray.forEach { srcNode ->
+            for (srcNode in sourcesArray) {
                 val fileUrl = srcNode.path("file").asText("").trim()
                 if (fileUrl.startsWith("http")) {
                     val qualityLabel = srcNode.path("label").asText("").trim()
@@ -892,7 +891,7 @@ class HindiAnimeDubProvider : MainAPI() {
             return false
         }
 
-        val origin = extractOrigin(embedUrl) ?: "$mainUrl"
+        val origin = extractOrigin(embedUrl) ?: mainUrl
 
         // Handle Vidara-compatible pages on unknown domains if they call /api/stream
         if (html.contains("/api/stream") && Regex("/(?:e|v)/([a-zA-Z0-9_-]+)").containsMatchIn(embedUrl)) {
@@ -909,11 +908,11 @@ class HindiAnimeDubProvider : MainAPI() {
         // Unwrap nested wrapper iframes (e.g., hentaidekho.com/?trembed=...)
         val doc = Jsoup.parse(html, embedUrl)
         var found = false
-        doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
+        for (iframe in doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]")) {
             val rawNested = iframe.attr("data-litespeed-src").trim()
                 .ifBlank { iframe.attr("data-src").trim() }
                 .ifBlank { iframe.attr("src").trim() }
-            val nestedUrl = normalizeEmbedUrl(rawNested) ?: return@forEach
+            val nestedUrl = normalizeEmbedUrl(rawNested) ?: continue
             if (nestedUrl != embedUrl) {
                 if (extractEmbedUrl(nestedUrl, serverLabel, embedUrl, subtitleCallback, callback, depth + 1)) {
                     found = true
@@ -923,7 +922,7 @@ class HindiAnimeDubProvider : MainAPI() {
         return found
     }
 
-    private fun extractMediaFromHtmlOrPacked(
+    private suspend fun extractMediaFromHtmlOrPacked(
         html: String,
         origin: String,
         serverLabel: String,
@@ -936,7 +935,7 @@ class HindiAnimeDubProvider : MainAPI() {
         var emitted = false
 
         val mediaRegex = Regex("""file\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
-        mediaRegex.findAll(searchText).map { it.groupValues[1] }.distinct().forEach { mediaUrl ->
+        for (mediaUrl in mediaRegex.findAll(searchText).map { it.groupValues[1] }.distinct()) {
             callback(
                 newExtractorLink(
                     source = name,
@@ -955,7 +954,7 @@ class HindiAnimeDubProvider : MainAPI() {
         }
 
         val subRegex = Regex("""file\s*:\s*["'](https?://[^"']+\.(?:vtt|srt)[^"']*)["']""", RegexOption.IGNORE_CASE)
-        subRegex.findAll(searchText).map { it.groupValues[1] }.distinct().forEach { subUrl ->
+        for (subUrl in subRegex.findAll(searchText).map { it.groupValues[1] }.distinct()) {
             if (!subUrl.contains("_sli.vtt", ignoreCase = true)) {
                 subtitleCallback(
                     newSubtitleFile(
