@@ -1,5 +1,30 @@
 [
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animepahe.ch&sz=%size%",
+        "jarFileSize": 104348,
+        "fileHash": "sha256-452aee3f43472a8f5387c809dedf0947b80370c29be80d3d36cff4042f454a5c",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 30457,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "AnimePaheProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimePaheProvider.jar",
+        "description": "Watch subbed and dubbed anime series and movies on AnimePahe (animepahe.ch)",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimePaheProvider.cs3",
+        "name": "AnimePaheProvider",
+        "jarHash": "sha256-a239cf5f569b459304e22eb83609a7425382e3251c32151d973581a0f50db607"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.blakiteanime.buzz&sz=%size%",
         "jarFileSize": 132181,
         "fileHash": "sha256-e4654b07475ebd5af509e84a228e384a17d386908a3254613ce48fe02ebbf467",
