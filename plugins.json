@@ -1,5 +1,29 @@
 [
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=www.animedubhindi.link&sz=%size%",
+        "jarFileSize": 118463,
+        "fileHash": "sha256-89cf9dfe05e50f4bc6da91a15b1d184aed828a931fedb67bf515e6009aea15a3",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 37345,
+        "status": 1,
+        "language": "hi",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie"
+        ],
+        "version": 1,
+        "internalName": "AnimeDubHindiProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeDubHindiProvider.jar",
+        "description": "Watch Hindi dubbed and multi-audio anime series and movies on AnimeDubHindi",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeDubHindiProvider.cs3",
+        "name": "AnimeDubHindiProvider",
+        "jarHash": "sha256-c4b6cbdda89cdb842a77b21215338944b8fbf76c659b191f0de45fd9971d1b63"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=animepahe.ch&sz=%size%",
         "jarFileSize": 104348,
         "fileHash": "sha256-452aee3f43472a8f5387c809dedf0947b80370c29be80d3d36cff4042f454a5c",
