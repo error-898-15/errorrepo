@@ -394,21 +394,35 @@ class BlakiteAnimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("|")
+        val cleanData = data.substringAfter("$mainUrl/").trim()
+        val parts = cleanData.split("|")
         if (parts.size < 2) return false
 
         val kind = parts[0]
-        val tmdbId = parts[1]
-        val episodeKey = parts.getOrNull(2)
+        val tmdbId = parts[1].trim()
+        val episodeKey = parts.getOrNull(2)?.trim()
+        val isMovieItem = kind.equals("Movie", ignoreCase = true) || episodeKey.isNullOrBlank()
 
-        val apiUrl = if (kind.equals("Movie", ignoreCase = true) || episodeKey.isNullOrBlank()) {
+        val apiUrl = if (isMovieItem) {
             "$apiBase/api/get.php?tmdbId=$tmdbId"
         } else {
             "$apiBase/api/get.php?id=$episodeKey&tmdbId=$tmdbId"
         }
 
+        val embedReferer = if (isMovieItem) {
+            "$apiBase/embed/$tmdbId"
+        } else {
+            "$apiBase/embed/$tmdbId/$episodeKey"
+        }
+
+        val streamHeaders = mapOf(
+            "Referer" to embedReferer,
+            "Origin" to apiBase,
+            "User-Agent" to USER_AGENT
+        )
+
         val responseText = try {
-            app.get(apiUrl, headers = apiHeaders).text
+            app.get(apiUrl, headers = streamHeaders).text
         } catch (_: Exception) {
             return false
         }
