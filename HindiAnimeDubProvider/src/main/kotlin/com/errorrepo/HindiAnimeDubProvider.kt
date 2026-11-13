@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URI
 import java.net.URLEncoder
 
 class HindiAnimeDubProvider : MainAPI() {
@@ -324,6 +325,7 @@ class HindiAnimeDubProvider : MainAPI() {
             val movieWatchUrl = fixUrl(
                 watchNowHref
                     ?: episodeElements.firstOrNull()?.attr("href")
+                    ?: findWatchLinksFromHomepage(pageUrl).firstOrNull()
                     ?: return null
             )
             return newMovieLoadResponse(title, pageUrl, TvType.AnimeMovie, movieWatchUrl) {
@@ -358,16 +360,18 @@ class HindiAnimeDubProvider : MainAPI() {
                 this.posterUrl = epThumb
             }
         }.ifEmpty {
-            watchNowHref?.let {
-                listOf(
-                    newEpisode(fixUrl(it)) {
-                        this.name = "Episode 1"
-                        this.season = 1
-                        this.episode = 1
-                        this.posterUrl = backdrop ?: poster
-                    }
-                )
-            } ?: emptyList()
+            val fallbackWatchUrls = watchNowHref?.let { listOf(fixUrl(it)) }
+                ?: findWatchLinksFromHomepage(pageUrl)
+            fallbackWatchUrls.mapIndexed { idx, epUrl ->
+                val epNum = Regex("-episode-(\\d+)/?$", RegexOption.IGNORE_CASE)
+                    .find(epUrl)?.groupValues?.get(1)?.toIntOrNull() ?: (idx + 1)
+                newEpisode(epUrl) {
+                    this.name = "Episode $epNum"
+                    this.season = 1
+                    this.episode = epNum
+                    this.posterUrl = backdrop ?: poster
+                }
+            }
         }
 
         val tvType = when (metaType) {
@@ -388,6 +392,20 @@ class HindiAnimeDubProvider : MainAPI() {
         }
     }
 
+    private suspend fun findWatchLinksFromHomepage(animeUrl: String): List<String> {
+        val slug = animeUrl.trimEnd('/').substringAfterLast('/').trim()
+        if (slug.isBlank()) return emptyList()
+        val homeDoc = try {
+            app.get("$mainUrl/homepage/", headers = defaultHeaders).document
+        } catch (_: Exception) {
+            return emptyList()
+        }
+        return homeDoc.select("a[href*='/watch/']")
+            .map { fixUrl(it.attr("href").trim()) }
+            .filter { it.contains("/watch/$slug", ignoreCase = true) }
+            .distinct()
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -403,7 +421,7 @@ class HindiAnimeDubProvider : MainAPI() {
 
         var foundAny = false
         val seenEmbedUrls = mutableSetOf<String>()
-        val embedElements = doc.select("div.player-selection [data-embed-id]")
+        val embedElements = doc.select("[data-embed-id]")
 
         for (el in embedElements) {
             val rawEmbedId = el.attr("data-embed-id").trim()
@@ -423,20 +441,19 @@ class HindiAnimeDubProvider : MainAPI() {
                 .filter { it.isNotBlank() }
                 .joinToString(" ")
 
-            if (extractEmbedUrl(embedUrl, displayLabel, watchUrl, subtitleCallback, callback)) {
+            if (extractEmbedUrl(embedUrl, displayLabel, watchUrl, subtitleCallback, callback, depth = 0)) {
                 foundAny = true
             }
         }
 
-        // Fallback if a page renders a direct iframe without data-embed-id attributes
-        if (!foundAny) {
-            doc.select("iframe[data-litespeed-src], iframe[src]").forEach { iframe ->
-                val iframeUrl = iframe.attr("data-litespeed-src").trim()
-                    .ifBlank { iframe.attr("src").trim() }
-                if (iframeUrl.startsWith("http") && seenEmbedUrls.add(iframeUrl)) {
-                    if (extractEmbedUrl(iframeUrl, name, watchUrl, subtitleCallback, callback)) {
-                        foundAny = true
-                    }
+        // Also inspect any direct/lazy iframe rendered on the watch page
+        doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
+            val iframeUrl = iframe.attr("data-litespeed-src").trim()
+                .ifBlank { iframe.attr("data-src").trim() }
+                .ifBlank { iframe.attr("src").trim() }
+            if (iframeUrl.startsWith("http") && seenEmbedUrls.add(iframeUrl)) {
+                if (extractEmbedUrl(iframeUrl, name, watchUrl, subtitleCallback, callback, depth = 0)) {
+                    foundAny = true
                 }
             }
         }
@@ -449,26 +466,108 @@ class HindiAnimeDubProvider : MainAPI() {
         serverLabel: String,
         refererUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        depth: Int
     ): Boolean {
+        if (depth > 2) return false
+        val lower = embedUrl.lowercase()
         return when {
-            embedUrl.contains("blakiteapi.xyz/embed/", ignoreCase = true) -> {
+            lower.contains("blakiteapi.xyz/embed/") -> {
                 extractBlakiteEmbed(embedUrl, serverLabel, callback)
             }
-            embedUrl.contains("ravok.buzz/video/", ignoreCase = true) -> {
-                extractRavokEmbed(embedUrl, serverLabel, refererUrl, callback)
+            lower.contains("vidara.to/") || lower.contains("vid.dubanime.me/") -> {
+                extractVidaraEmbed(embedUrl, serverLabel, subtitleCallback, callback)
             }
-            embedUrl.contains("nuvorel.top/", ignoreCase = true) -> {
-                extractNuvorelEmbed(embedUrl, serverLabel, refererUrl, subtitleCallback, callback)
+            lower.contains("ravok.buzz/video/") ||
+                Regex("https?://[^/]+/video/[a-f0-9]{16,}").containsMatchIn(lower) -> {
+                extractVPlayerEmbed(embedUrl, serverLabel, refererUrl, callback)
+            }
+            lower.contains("nuvorel.top/") || lower.contains("morencius.com/") -> {
+                extractStreamRubyEmbed(embedUrl, serverLabel, refererUrl, subtitleCallback, callback)
             }
             else -> {
-                try {
+                val builtInOk = try {
                     loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)
                 } catch (_: Exception) {
                     false
                 }
+                if (builtInOk) return true
+                extractGenericOrNestedEmbed(
+                    embedUrl,
+                    serverLabel,
+                    refererUrl,
+                    subtitleCallback,
+                    callback,
+                    depth
+                )
             }
         }
+    }
+
+    private suspend fun extractVidaraEmbed(
+        embedUrl: String,
+        serverLabel: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val origin = extractOrigin(embedUrl) ?: return false
+        val fileCode = Regex("/(?:e|v)/([a-zA-Z0-9_-]+)")
+            .find(embedUrl)?.groupValues?.get(1) ?: return false
+        val apiUrl = "$origin/api/stream"
+        val headers = mapOf(
+            "User-Agent" to USER_AGENT,
+            "Referer" to "$origin/e/$fileCode",
+            "Origin" to origin
+        )
+        val responseText = try {
+            app.post(
+                apiUrl,
+                headers = headers,
+                json = mapOf(
+                    "filecode" to fileCode,
+                    "device" to "desktop"
+                )
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
+        val root = try {
+            mapper.readTree(responseText)
+        } catch (_: Exception) {
+            return false
+        }
+        val streamingUrl = root.path("streaming_url").asText("").trim()
+        if (!streamingUrl.startsWith("http")) return false
+
+        val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else "Vidara"
+        callback(
+            newExtractorLink(
+                source = name,
+                name = labelPrefix,
+                url = streamingUrl,
+                type = if (streamingUrl.contains(".m3u8", ignoreCase = true)) {
+                    ExtractorLinkType.M3U8
+                } else {
+                    ExtractorLinkType.VIDEO
+                }
+            ) {
+                this.referer = "$origin/"
+            }
+        )
+
+        root.path("subtitles").forEach { sub ->
+            val subUrl = sub.path("file_path").asText("").trim()
+            val subLang = sub.path("language").asText("English").trim()
+            if (subUrl.startsWith("http")) {
+                subtitleCallback(
+                    newSubtitleFile(
+                        lang = subLang.ifBlank { "English" },
+                        url = subUrl
+                    )
+                )
+            }
+        }
+        return true
     }
 
     private suspend fun extractBlakiteEmbed(
@@ -591,20 +690,20 @@ class HindiAnimeDubProvider : MainAPI() {
         return emitted
     }
 
-    private suspend fun extractRavokEmbed(
+    private suspend fun extractVPlayerEmbed(
         embedUrl: String,
         serverLabel: String,
         refererUrl: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val origin = extractOrigin(embedUrl) ?: return false
         val videoId = Regex("/video/([a-zA-Z0-9]+)")
             .find(embedUrl)?.groupValues?.get(1) ?: return false
-        val ravokOrigin = "https://ravok.buzz"
-        val apiUrl = "$ravokOrigin/player/index.php?data=$videoId&do=getVideo"
+        val apiUrl = "$origin/player/index.php?data=$videoId&do=getVideo"
         val postHeaders = mapOf(
             "User-Agent" to USER_AGENT,
             "Referer" to embedUrl,
-            "Origin" to ravokOrigin,
+            "Origin" to origin,
             "X-Requested-With" to "XMLHttpRequest"
         )
         val responseText = try {
@@ -613,7 +712,7 @@ class HindiAnimeDubProvider : MainAPI() {
                 headers = postHeaders,
                 data = mapOf(
                     "hash" to videoId,
-                    "r" to refererUrl
+                    "r" to "$mainUrl/"
                 )
             ).text
         } catch (_: Exception) {
@@ -625,33 +724,131 @@ class HindiAnimeDubProvider : MainAPI() {
             return false
         }
 
+        val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else "VPlayer"
+        var emitted = false
+
         val streamUrl = root.path("securedLink").asText("").trim()
             .ifBlank { root.path("videoSource").asText("").trim() }
-        if (streamUrl.isBlank() || !streamUrl.startsWith("http")) return false
+        if (streamUrl.startsWith("http")) {
+            val isHls = root.path("hls").asBoolean(false) ||
+                streamUrl.contains(".m3u8", ignoreCase = true)
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = labelPrefix,
+                    url = streamUrl,
+                    type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = "$origin/"
+                }
+            )
+            emitted = true
+        }
 
-        val isHls = root.path("hls").asBoolean(false) ||
-            streamUrl.contains(".m3u8", ignoreCase = true)
-        val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else "Ravok"
-
-        callback(
-            newExtractorLink(
-                source = name,
-                name = labelPrefix,
-                url = streamUrl,
-                type = if (isHls) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            ) {
-                this.referer = "$ravokOrigin/"
+        val sourcesArray = root.path("videoSources")
+        if (!emitted && sourcesArray.isArray) {
+            sourcesArray.forEach { srcNode ->
+                val fileUrl = srcNode.path("file").asText("").trim()
+                if (fileUrl.startsWith("http")) {
+                    val qualityLabel = srcNode.path("label").asText("").trim()
+                    val linkTitle = listOf(labelPrefix, qualityLabel)
+                        .filter { it.isNotBlank() }
+                        .joinToString(" ")
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = linkTitle,
+                            url = fileUrl,
+                            type = if (fileUrl.contains(".m3u8", ignoreCase = true)) {
+                                ExtractorLinkType.M3U8
+                            } else {
+                                ExtractorLinkType.VIDEO
+                            }
+                        ) {
+                            this.quality = getQualityFromName(qualityLabel)
+                            this.referer = "$origin/"
+                        }
+                    )
+                    emitted = true
+                }
             }
-        )
-        return true
+        }
+
+        return emitted
     }
 
-    private suspend fun extractNuvorelEmbed(
+    private suspend fun extractStreamRubyEmbed(
         embedUrl: String,
         serverLabel: String,
         refererUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val origin = extractOrigin(embedUrl) ?: "https://nuvorel.top"
+        val html = try {
+            app.get(
+                embedUrl,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to refererUrl
+                )
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
+
+        val unpacked = unpackPackedScripts(html)
+        val searchText = "$html\n$unpacked"
+        val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else "Multi"
+        var emitted = false
+
+        val mediaRegex = Regex("""file\s*:\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']""", RegexOption.IGNORE_CASE)
+        mediaRegex.findAll(searchText).map { it.groupValues[1] }.distinct().forEach { mediaUrl ->
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = labelPrefix,
+                    url = mediaUrl,
+                    type = if (mediaUrl.contains(".m3u8", ignoreCase = true)) {
+                        ExtractorLinkType.M3U8
+                    } else {
+                        ExtractorLinkType.VIDEO
+                    }
+                ) {
+                    this.referer = "$origin/"
+                }
+            )
+            emitted = true
+        }
+
+        val subRegex = Regex("""file\s*:\s*["'](https?://[^"']+\.(?:vtt|srt)[^"']*)["']""", RegexOption.IGNORE_CASE)
+        subRegex.findAll(searchText).map { it.groupValues[1] }.distinct().forEach { subUrl ->
+            if (!subUrl.contains("_sli.vtt", ignoreCase = true)) {
+                subtitleCallback(
+                    newSubtitleFile(
+                        lang = "English",
+                        url = subUrl
+                    )
+                )
+            }
+        }
+
+        if (emitted) return true
+
+        return try {
+            loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun extractGenericOrNestedEmbed(
+        embedUrl: String,
+        serverLabel: String,
+        refererUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        depth: Int
     ): Boolean {
         val html = try {
             app.get(
@@ -665,27 +862,79 @@ class HindiAnimeDubProvider : MainAPI() {
             return false
         }
 
-        val m3u8Match = Regex("""file\s*:\s*["'](https?://[^"']+\.m3u8[^"']*)["']""")
-            .find(html)?.groupValues?.get(1)
-        if (!m3u8Match.isNullOrBlank()) {
-            val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else "Multi"
-            callback(
-                newExtractorLink(
-                    source = name,
-                    name = labelPrefix,
-                    url = m3u8Match,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = "https://nuvorel.top/"
-                }
-            )
-            return true
+        // Handle Vidara-compatible pages on unknown domains if they call /api/stream
+        if (html.contains("/api/stream") && Regex("/(?:e|v)/([a-zA-Z0-9_-]+)").containsMatchIn(embedUrl)) {
+            if (extractVidaraEmbed(embedUrl, serverLabel, subtitleCallback, callback)) {
+                return true
+            }
         }
 
+        // Unwrap nested wrapper iframes (e.g., hentaidekho.com/?trembed=...)
+        val doc = Jsoup.parse(html, embedUrl)
+        var found = false
+        doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
+            val nestedUrl = iframe.attr("data-litespeed-src").trim()
+                .ifBlank { iframe.attr("data-src").trim() }
+                .ifBlank { iframe.attr("src").trim() }
+            if (nestedUrl.startsWith("http") && nestedUrl != embedUrl) {
+                if (extractEmbedUrl(nestedUrl, serverLabel, embedUrl, subtitleCallback, callback, depth + 1)) {
+                    found = true
+                }
+            }
+        }
+        return found
+    }
+
+    private fun unpackPackedScripts(html: String): String {
+        val packerRegex = Regex(
+            """eval\(function\(p,a,c,k,e,[dr]\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""",
+            setOf(RegexOption.DOT_MATCHES_ALL)
+        )
+        val out = StringBuilder()
+        packerRegex.findAll(html).forEach { match ->
+            val payload = match.groupValues[1]
+                .replace("\\'", "'")
+                .replace("\\\\", "\\")
+            val radix = match.groupValues[2].toIntOrNull() ?: return@forEach
+            val count = match.groupValues[3].toIntOrNull() ?: return@forEach
+            val dict = match.groupValues[4].split("|")
+            val unpacked = Regex("\\b\\w+\\b").replace(payload) { wordMatch ->
+                val token = wordMatch.value
+                val idx = decodeBaseRadix(token, radix)
+                if (idx in 0 until count && idx < dict.size && dict[idx].isNotEmpty()) {
+                    dict[idx]
+                } else {
+                    token
+                }
+            }
+            out.append(unpacked).append('\n')
+        }
+        return out.toString()
+    }
+
+    private fun decodeBaseRadix(token: String, radix: Int): Int {
+        var result = 0
+        for (ch in token) {
+            val digit = when (ch) {
+                in '0'..'9' -> ch - '0'
+                in 'a'..'z' -> ch - 'a' + 10
+                in 'A'..'Z' -> ch - 'A' + 36
+                else -> return -1
+            }
+            if (digit >= radix) return -1
+            result = result * radix + digit
+        }
+        return result
+    }
+
+    private fun extractOrigin(url: String): String? {
         return try {
-            loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)
+            val uri = URI(url)
+            val scheme = uri.scheme ?: return null
+            val host = uri.host ?: return null
+            if (uri.port > 0) "$scheme://$host:${uri.port}" else "$scheme://$host"
         } catch (_: Exception) {
-            false
+            null
         }
     }
 
@@ -777,7 +1026,10 @@ class HindiAnimeDubProvider : MainAPI() {
     }
 
     private fun decodeBase64(input: String): String {
-        val cleaned = input.trim().filter { !it.isWhitespace() }
+        val cleaned = input.trim()
+            .filter { !it.isWhitespace() }
+            .replace('-', '+')
+            .replace('_', '/')
         if (cleaned.isEmpty()) return ""
         val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         val output = ArrayList<Byte>((cleaned.length * 3) / 4)
