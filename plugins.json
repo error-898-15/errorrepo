@@ -25,6 +25,31 @@
         "jarHash": "sha256-07069e1a6d11f4d4f15ed450c9826ff9582e9aa73fc13de9f0414c9e8ba710bf"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=hindidubanime.com&sz=%size%",
+        "jarFileSize": 146554,
+        "fileHash": "sha256-dee8a1e0eb698eea25daa7978961bd84d57be6c978605e1cfcd69277059dbe20",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 40606,
+        "status": 1,
+        "language": "hi",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "HindiAnimeDubProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/HindiAnimeDubProvider.jar",
+        "description": "Watch Hindi dubbed and subbed anime series and movies on Hindi Dub Anime",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/HindiAnimeDubProvider.cs3",
+        "name": "HindiAnimeDubProvider",
+        "jarHash": "sha256-45a5fe37ebccad2569907117852c9fe426776fc32a840c3dbfe54ec9e97bf1e5"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.youtube.com&sz=%size%",
         "jarFileSize": 85291,
         "fileHash": "sha256-275e034aadb8ce4a317d28f01d03d8663b77fdb19ee1ae8d26e0096de246a776",
