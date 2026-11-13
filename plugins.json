@@ -1,5 +1,30 @@
 [
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=www.blakiteanime.buzz&sz=%size%",
+        "jarFileSize": 130356,
+        "fileHash": "sha256-0e01d1b885149bbd0a29a122401aedf54f4145eeab24bd5af6c77d125bc78780",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 32894,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "AsianDrama"
+        ],
+        "version": 1,
+        "internalName": "BlakiteAnimeProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/BlakiteAnimeProvider.jar",
+        "description": "Watch Hindi & English dubbed/subbed anime and dramas on Blakite Anime",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/BlakiteAnimeProvider.cs3",
+        "name": "BlakiteAnimeProvider",
+        "jarHash": "sha256-1dd5df21540495302c3b47a2c9e592d055c5637b1d2f4122be253c449c24131c"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.youtube.com&sz=%size%",
         "jarFileSize": 85291,
         "fileHash": "sha256-275e034aadb8ce4a317d28f01d03d8663b77fdb19ee1ae8d26e0096de246a776",
