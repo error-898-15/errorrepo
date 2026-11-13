@@ -1,11 +1,11 @@
 [
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.youtube.com&sz=%size%",
-        "jarFileSize": 76172,
-        "fileHash": "sha256-ebc7653daa7e22eac484da73413f0fe6ee2ed4434ebf330e5a0a92b8ca4bae7c",
+        "jarFileSize": 85291,
+        "fileHash": "sha256-275e034aadb8ce4a317d28f01d03d8663b77fdb19ee1ae8d26e0096de246a776",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/error-898-15/errorrepo",
-        "fileSize": 19164,
+        "fileSize": 21546,
         "status": 1,
         "language": "en",
         "authors": [
@@ -16,12 +16,12 @@
             "Live",
             "TvSeries"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "YouTubeProvider",
         "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/YouTubeProvider.jar",
         "description": "Watch public YouTube videos, live streams, channels, and playlists",
         "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/YouTubeProvider.cs3",
         "name": "YouTubeProvider",
-        "jarHash": "sha256-2d099593090a9191710e554096307a847e242f7b8f2ca378bd0ddb1bda8602cc"
+        "jarHash": "sha256-6c1fb012682948c22f9392743f3fdbe9f4c07498cc0dcd732d61ca23f2997f28"
     }
 ]
