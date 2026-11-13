@@ -1,0 +1,155 @@
+name: Build errorrepo Plugins
+
+concurrency:
+  group: "build-errorrepo"
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '*.md'
+      - 'assets/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source branch
+        uses: actions/checkout@v4
+        with:
+          path: "src"
+
+      - name: Prepare builds branch workspace
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          if git ls-remote --exit-code --heads "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" builds >/dev/null 2>&1; then
+            git clone --branch builds --single-branch "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "$GITHUB_WORKSPACE/builds"
+          else
+            mkdir -p "$GITHUB_WORKSPACE/builds"
+            cd "$GITHUB_WORKSPACE/builds"
+            git init
+            git checkout -b builds
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          fi
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle 8.12
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.12"
+
+      - name: Build plugins and validate output
+        id: build_plugins
+        run: |
+          cd "$GITHUB_WORKSPACE/src"
+
+          # Detect active subprojects from settings.gradle.kts
+          PLUGIN_COUNT=$(find . -mindepth 2 -maxdepth 2 -name "build.gradle.kts" | wc -l | tr -d ' ')
+          echo "Detected plugin module files: $PLUGIN_COUNT"
+
+          if [ "$PLUGIN_COUNT" -eq 0 ]; then
+            echo "No plugin modules configured yet. Publishing empty active plugins.json index."
+            mkdir -p "$GITHUB_WORKSPACE/staging"
+            echo "[]" > "$GITHUB_WORKSPACE/staging/plugins.json"
+            exit 0
+          fi
+
+          if [ -f "./gradlew" ] && [ -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+            chmod +x gradlew
+            ./gradlew make makePluginsJson
+          else
+            gradle make makePluginsJson
+          fi
+
+          mkdir -p "$GITHUB_WORKSPACE/staging"
+
+          shopt -s nullglob
+          CS3_FILES=( */build/*.cs3 )
+          if [ ${#CS3_FILES[@]} -eq 0 ]; then
+            echo "::error::Build produced zero .cs3 packages even though plugin modules exist."
+            exit 1
+          fi
+
+          for f in "${CS3_FILES[@]}"; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Generated .cs3 package is empty: $f"
+              exit 1
+            fi
+            cp "$f" "$GITHUB_WORKSPACE/staging/"
+          done
+
+          if [ ! -f "build/plugins.json" ]; then
+            echo "::error::Gradle task makePluginsJson did not produce build/plugins.json."
+            exit 1
+          fi
+
+          cp "build/plugins.json" "$GITHUB_WORKSPACE/staging/plugins.json"
+
+      - name: Validate plugins.json and repo.json
+        run: |
+          python3 - <<'EOF'
+          import json, os, sys
+
+          repo_path = os.path.join(os.environ["GITHUB_WORKSPACE"], "src", "repo.json")
+          plugins_path = os.path.join(os.environ["GITHUB_WORKSPACE"], "staging", "plugins.json")
+          staging_dir = os.path.join(os.environ["GITHUB_WORKSPACE"], "staging")
+
+          with open(repo_path, "r", encoding="utf-8") as f:
+              repo = json.load(f)
+
+          assert repo.get("name") == "errorrepo", "repo.json name must be errorrepo"
+          assert repo.get("manifestVersion") == 1, "repo.json manifestVersion must be 1"
+          assert isinstance(repo.get("pluginLists"), list) and len(repo["pluginLists"]) > 0, "repo.json pluginLists missing"
+
+          with open(plugins_path, "r", encoding="utf-8") as f:
+              plugins = json.load(f)
+
+          assert isinstance(plugins, list), "plugins.json must be a JSON array"
+
+          for p in plugins:
+              for req in ("name", "internalName", "version", "apiVersion", "url", "status", "fileSize", "fileHash"):
+                  assert req in p and p[req] is not None, f"Missing required field '{req}' in {p}"
+              assert isinstance(p["version"], int) and p["version"] > 0, f"Invalid version in {p['name']}"
+              assert p["fileHash"].startswith("sha256-"), f"Invalid fileHash format in {p['name']}"
+              expected_cs3 = os.path.join(staging_dir, f"{p['internalName']}.cs3")
+              assert os.path.isfile(expected_cs3), f"Missing staged .cs3 for {p['internalName']}"
+              assert os.path.getsize(expected_cs3) == p["fileSize"], f"fileSize mismatch for {p['internalName']}"
+
+          print(f"Validation passed: {len(plugins)} plugin(s) verified.")
+          EOF
+
+      - name: Publish validated artifacts to builds branch
+        run: |
+          cd "$GITHUB_WORKSPACE/builds"
+          rm -f *.cs3 *.jar plugins.json
+          cp "$GITHUB_WORKSPACE/staging/"* .
+          cp "$GITHUB_WORKSPACE/src/repo.json" ./repo.json
+
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to publish."
+            exit 0
+          fi
+
+          git commit -m "Publish errorrepo builds (${GITHUB_SHA::7})"
+          git push origin builds
