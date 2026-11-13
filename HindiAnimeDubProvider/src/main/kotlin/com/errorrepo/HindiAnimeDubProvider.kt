@@ -11,6 +11,7 @@ import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.net.URLDecoder
 import java.net.URLEncoder
 
 class HindiAnimeDubProvider : MainAPI() {
@@ -428,8 +429,7 @@ class HindiAnimeDubProvider : MainAPI() {
             if (!rawEmbedId.contains(":")) continue
             val parts = rawEmbedId.split(":", limit = 2)
             val serverLabel = decodeBase64(parts[0]).ifBlank { el.text().trim() }
-            val embedUrl = decodeBase64(parts[1]).trim()
-            if (embedUrl.isBlank() || !embedUrl.startsWith("http")) continue
+            val embedUrl = normalizeEmbedUrl(decodeBase64(parts[1])) ?: continue
             if (!seenEmbedUrls.add(embedUrl)) continue
 
             val categoryTag = when {
@@ -448,10 +448,11 @@ class HindiAnimeDubProvider : MainAPI() {
 
         // Also inspect any direct/lazy iframe rendered on the watch page
         doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
-            val iframeUrl = iframe.attr("data-litespeed-src").trim()
+            val rawIframeUrl = iframe.attr("data-litespeed-src").trim()
                 .ifBlank { iframe.attr("data-src").trim() }
                 .ifBlank { iframe.attr("src").trim() }
-            if (iframeUrl.startsWith("http") && seenEmbedUrls.add(iframeUrl)) {
+            val iframeUrl = normalizeEmbedUrl(rawIframeUrl) ?: return@forEach
+            if (seenEmbedUrls.add(iframeUrl)) {
                 if (extractEmbedUrl(iframeUrl, name, watchUrl, subtitleCallback, callback, depth = 0)) {
                     foundAny = true
                 }
@@ -479,11 +480,17 @@ class HindiAnimeDubProvider : MainAPI() {
                 extractVidaraEmbed(embedUrl, serverLabel, subtitleCallback, callback)
             }
             lower.contains("ravok.buzz/video/") ||
-                Regex("https?://[^/]+/video/[a-f0-9]{16,}").containsMatchIn(lower) -> {
-                extractVPlayerEmbed(embedUrl, serverLabel, refererUrl, callback)
+                Regex("https?://[^/]+/video/[a-z0-9]{16,}").containsMatchIn(lower) -> {
+                extractVPlayerEmbed(embedUrl, serverLabel, callback)
             }
-            lower.contains("nuvorel.top/") || lower.contains("morencius.com/") -> {
-                extractStreamRubyEmbed(embedUrl, serverLabel, refererUrl, subtitleCallback, callback)
+            lower.contains("nuvorel.top/") ||
+                lower.contains("morencius.com/") ||
+                lower.contains("vidmoly.net/") ||
+                lower.contains("vidmoly.biz/") -> {
+                extractDirectOrPackedEmbed(embedUrl, serverLabel, refererUrl, subtitleCallback, callback)
+            }
+            lower.contains("player.php") && lower.contains("data=") -> {
+                extractBase64PlaylistEmbed(embedUrl, serverLabel, subtitleCallback, callback, depth)
             }
             else -> {
                 val builtInOk = try {
@@ -502,6 +509,43 @@ class HindiAnimeDubProvider : MainAPI() {
                 )
             }
         }
+    }
+
+    private suspend fun extractBase64PlaylistEmbed(
+        embedUrl: String,
+        serverLabel: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        depth: Int
+    ): Boolean {
+        val rawParam = try {
+            val query = URI(embedUrl).rawQuery ?: return false
+            query.split("&")
+                .firstOrNull { it.startsWith("data=") }
+                ?.substringAfter("data=")
+                ?.let { URLDecoder.decode(it, "UTF-8") }
+                ?: return false
+        } catch (_: Exception) {
+            return false
+        }
+        val decodedJson = decodeBase64(rawParam)
+        if (decodedJson.isBlank()) return false
+        val arrayNode = try {
+            mapper.readTree(decodedJson)
+        } catch (_: Exception) {
+            return false
+        }
+        if (!arrayNode.isArray) return false
+        var found = false
+        arrayNode.forEach { item ->
+            val link = normalizeEmbedUrl(item.path("link").asText("")) ?: return@forEach
+            val lang = item.path("language").asText("").trim()
+            val label = if (lang.isNotBlank()) "$serverLabel ($lang)" else serverLabel
+            if (extractEmbedUrl(link, label, embedUrl, subtitleCallback, callback, depth + 1)) {
+                found = true
+            }
+        }
+        return found
     }
 
     private suspend fun extractVidaraEmbed(
@@ -575,36 +619,57 @@ class HindiAnimeDubProvider : MainAPI() {
         serverLabel: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val afterEmbed = embedUrl.substringAfter("/embed/", "").trim('/')
+        val afterEmbed = embedUrl.substringAfter("/embed/", "")
+            .substringBefore("?")
+            .trim('/')
         if (afterEmbed.isBlank()) return false
         val segments = afterEmbed.split("/").filter { it.isNotBlank() }
         val tmdbId = segments.getOrNull(0) ?: return false
         val episodeKey = segments.getOrNull(1)
-        val apiUrl = if (episodeKey.isNullOrBlank()) {
-            "$blakiteApiBase/api/get.php?tmdbId=$tmdbId"
-        } else {
-            "$blakiteApiBase/api/get.php?id=$episodeKey&tmdbId=$tmdbId"
-        }
-        val streamHeaders = mapOf(
-            "Referer" to embedUrl,
-            "Origin" to blakiteApiBase,
-            "User-Agent" to USER_AGENT
-        )
-        val responseText = try {
-            app.get(apiUrl, headers = streamHeaders).text
-        } catch (_: Exception) {
-            return false
-        }
-        val root = try {
-            mapper.readTree(responseText)
-        } catch (_: Exception) {
-            return false
-        }
-        val streamData = root.path("data")
-        if (streamData.isMissingNode || !streamData.isObject) return false
+        val embedOrigin = extractOrigin(embedUrl) ?: blakiteApiBase
 
-        val directVideoUrl = streamData.path("videoUrl").asText("").trim()
-        val langLabel = streamData.path("language").asText("").trim()
+        // blakiteapi.xyz enforces same-origin Referer matching the API host (e.g. test.blakiteapi.xyz vs blakiteapi.xyz)
+        val candidates = buildList {
+            add(Triple(embedOrigin, embedUrl, embedOrigin))
+            if (!embedOrigin.equals(blakiteApiBase, ignoreCase = true)) {
+                add(Triple(blakiteApiBase, "$blakiteApiBase/embed/$afterEmbed", blakiteApiBase))
+            }
+        }
+
+        var resolvedOrigin = embedOrigin
+        var streamData: com.fasterxml.jackson.databind.JsonNode? = null
+        for ((apiHost, refUrl, originHeader) in candidates) {
+            val apiUrl = if (episodeKey.isNullOrBlank()) {
+                "$apiHost/api/get.php?tmdbId=$tmdbId"
+            } else {
+                "$apiHost/api/get.php?id=$episodeKey&tmdbId=$tmdbId"
+            }
+            val streamHeaders = mapOf(
+                "Referer" to refUrl,
+                "Origin" to originHeader,
+                "User-Agent" to USER_AGENT
+            )
+            val responseText = try {
+                app.get(apiUrl, headers = streamHeaders).text
+            } catch (_: Exception) {
+                continue
+            }
+            val root = try {
+                mapper.readTree(responseText)
+            } catch (_: Exception) {
+                continue
+            }
+            val dataNode = root.path("data")
+            if (!dataNode.isMissingNode && dataNode.isObject) {
+                resolvedOrigin = originHeader
+                streamData = dataNode
+                break
+            }
+        }
+
+        val data = streamData ?: return false
+        val directVideoUrl = data.path("videoUrl").asText("").trim()
+        val langLabel = data.path("language").asText("").trim()
         val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else name
         val langSuffix = if (langLabel.isNotBlank()) " ($langLabel)" else ""
 
@@ -620,17 +685,17 @@ class HindiAnimeDubProvider : MainAPI() {
                         ExtractorLinkType.VIDEO
                     }
                 ) {
-                    this.referer = "$blakiteApiBase/"
+                    this.referer = "$resolvedOrigin/"
                 }
             )
             return true
         }
 
-        val dataId = streamData.path("dataId").asText("").trim()
+        val dataId = data.path("dataId").asText("").trim()
         if (dataId.isEmpty()) return false
-        val format = streamData.path("format").asText("M3U8").trim()
-        val qid = streamData.path("qid").asInt(5).coerceIn(1, 5)
-        val rangesRaw = streamData.path("ranges").asText("")
+        val format = data.path("format").asText("M3U8").trim()
+        val qid = data.path("qid").asInt(5).coerceIn(1, 5)
+        val rangesRaw = data.path("ranges").asText("")
         val qualityCodes = listOf("oaa", "baa", "caa", "gaa", "haa")
         val qualityLabels = listOf("240p", "360p", "480p", "720p", "1080p")
         var emitted = false
@@ -661,7 +726,7 @@ class HindiAnimeDubProvider : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     ) {
                         this.quality = getQualityFromName(label)
-                        this.referer = "$blakiteApiBase/"
+                        this.referer = "$resolvedOrigin/"
                     }
                 )
                 emitted = true
@@ -681,7 +746,7 @@ class HindiAnimeDubProvider : MainAPI() {
                         type = ExtractorLinkType.VIDEO
                     ) {
                         this.quality = getQualityFromName(label)
-                        this.referer = "$blakiteApiBase/"
+                        this.referer = "$resolvedOrigin/"
                     }
                 )
                 emitted = true
@@ -693,7 +758,6 @@ class HindiAnimeDubProvider : MainAPI() {
     private suspend fun extractVPlayerEmbed(
         embedUrl: String,
         serverLabel: String,
-        refererUrl: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val origin = extractOrigin(embedUrl) ?: return false
@@ -777,7 +841,7 @@ class HindiAnimeDubProvider : MainAPI() {
         return emitted
     }
 
-    private suspend fun extractStreamRubyEmbed(
+    private suspend fun extractDirectOrPackedEmbed(
         embedUrl: String,
         serverLabel: String,
         refererUrl: String,
@@ -797,6 +861,75 @@ class HindiAnimeDubProvider : MainAPI() {
             return false
         }
 
+        if (extractMediaFromHtmlOrPacked(html, origin, serverLabel, subtitleCallback, callback)) {
+            return true
+        }
+
+        return try {
+            loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun extractGenericOrNestedEmbed(
+        embedUrl: String,
+        serverLabel: String,
+        refererUrl: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        depth: Int
+    ): Boolean {
+        val html = try {
+            app.get(
+                embedUrl,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Referer" to refererUrl
+                )
+            ).text
+        } catch (_: Exception) {
+            return false
+        }
+
+        val origin = extractOrigin(embedUrl) ?: "$mainUrl"
+
+        // Handle Vidara-compatible pages on unknown domains if they call /api/stream
+        if (html.contains("/api/stream") && Regex("/(?:e|v)/([a-zA-Z0-9_-]+)").containsMatchIn(embedUrl)) {
+            if (extractVidaraEmbed(embedUrl, serverLabel, subtitleCallback, callback)) {
+                return true
+            }
+        }
+
+        // Extract direct or packed JWPlayer/HLS file URLs if present on unknown hosts
+        if (extractMediaFromHtmlOrPacked(html, origin, serverLabel, subtitleCallback, callback)) {
+            return true
+        }
+
+        // Unwrap nested wrapper iframes (e.g., hentaidekho.com/?trembed=...)
+        val doc = Jsoup.parse(html, embedUrl)
+        var found = false
+        doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
+            val rawNested = iframe.attr("data-litespeed-src").trim()
+                .ifBlank { iframe.attr("data-src").trim() }
+                .ifBlank { iframe.attr("src").trim() }
+            val nestedUrl = normalizeEmbedUrl(rawNested) ?: return@forEach
+            if (nestedUrl != embedUrl) {
+                if (extractEmbedUrl(nestedUrl, serverLabel, embedUrl, subtitleCallback, callback, depth + 1)) {
+                    found = true
+                }
+            }
+        }
+        return found
+    }
+
+    private fun extractMediaFromHtmlOrPacked(
+        html: String,
+        origin: String,
+        serverLabel: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val unpacked = unpackPackedScripts(html)
         val searchText = "$html\n$unpacked"
         val labelPrefix = if (serverLabel.isNotBlank()) serverLabel else "Multi"
@@ -833,56 +966,7 @@ class HindiAnimeDubProvider : MainAPI() {
             }
         }
 
-        if (emitted) return true
-
-        return try {
-            loadExtractor(embedUrl, "$mainUrl/", subtitleCallback, callback)
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private suspend fun extractGenericOrNestedEmbed(
-        embedUrl: String,
-        serverLabel: String,
-        refererUrl: String,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        depth: Int
-    ): Boolean {
-        val html = try {
-            app.get(
-                embedUrl,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to refererUrl
-                )
-            ).text
-        } catch (_: Exception) {
-            return false
-        }
-
-        // Handle Vidara-compatible pages on unknown domains if they call /api/stream
-        if (html.contains("/api/stream") && Regex("/(?:e|v)/([a-zA-Z0-9_-]+)").containsMatchIn(embedUrl)) {
-            if (extractVidaraEmbed(embedUrl, serverLabel, subtitleCallback, callback)) {
-                return true
-            }
-        }
-
-        // Unwrap nested wrapper iframes (e.g., hentaidekho.com/?trembed=...)
-        val doc = Jsoup.parse(html, embedUrl)
-        var found = false
-        doc.select("iframe[data-litespeed-src], iframe[data-src], iframe[src]").forEach { iframe ->
-            val nestedUrl = iframe.attr("data-litespeed-src").trim()
-                .ifBlank { iframe.attr("data-src").trim() }
-                .ifBlank { iframe.attr("src").trim() }
-            if (nestedUrl.startsWith("http") && nestedUrl != embedUrl) {
-                if (extractEmbedUrl(nestedUrl, serverLabel, embedUrl, subtitleCallback, callback, depth + 1)) {
-                    found = true
-                }
-            }
-        }
-        return found
+        return emitted
     }
 
     private fun unpackPackedScripts(html: String): String {
@@ -925,6 +1009,16 @@ class HindiAnimeDubProvider : MainAPI() {
             result = result * radix + digit
         }
         return result
+    }
+
+    private fun normalizeEmbedUrl(rawUrl: String): String? {
+        val trimmed = rawUrl.trim()
+        return when {
+            trimmed.startsWith("http://", ignoreCase = true) ||
+                trimmed.startsWith("https://", ignoreCase = true) -> trimmed
+            trimmed.startsWith("//") -> "https:$trimmed"
+            else -> null
+        }
     }
 
     private fun extractOrigin(url: String): String? {
