@@ -1,14 +1,7 @@
----
-
-## Repository Manifest (`repo.json`) & Logo Branding
-
-### File 7: `repo.json`
-- **WHERE:** Root of `main` → `repo.json`
-
-```json
 {
   "name": "errorrepo",
   "description": "CloudStream CS3 extension repository maintained by error-898-15.",
+  "iconUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/main/assets/logo.png",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/plugins.json"
