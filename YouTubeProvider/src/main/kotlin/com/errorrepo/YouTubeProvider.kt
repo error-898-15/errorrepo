@@ -9,12 +9,8 @@ import org.schabi.newpipe.extractor.Image
 import org.schabi.newpipe.extractor.InfoItem
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.ServiceList
-import org.schabi.newpipe.extractor.StreamingService
-import org.schabi.newpipe.extractor.channel.ChannelInfo
 import org.schabi.newpipe.extractor.channel.ChannelInfoItem
-import org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo
 import org.schabi.newpipe.extractor.channel.tabs.ChannelTabs
-import org.schabi.newpipe.extractor.playlist.PlaylistInfo
 import org.schabi.newpipe.extractor.playlist.PlaylistInfoItem
 import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
@@ -66,7 +62,7 @@ class YouTubeProvider : MainAPI() {
                 val extractor = service.kioskList.getExtractorById(kioskId, nextPage)
                 extractor.getPage(nextPage)
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             return newHomePageResponse(emptyList(), false)
         }
 
@@ -96,7 +92,7 @@ class YouTubeProvider : MainAPI() {
             extractor.initialPage.items
                 .mapNotNull { it.toSearchResponse() }
                 .distinctBy { it.url }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             emptyList()
         }
     }
@@ -121,7 +117,7 @@ class YouTubeProvider : MainAPI() {
                     ?: return newSearchResponseList(emptyList(), false)
                 extractor.getPage(nextPage)
             }
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             return newSearchResponseList(emptyList(), false)
         }
 
@@ -139,41 +135,56 @@ class YouTubeProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val normalizedUrl = fixUrl(url)
-        val linkType = try {
-            service.getLinkTypeByUrl(normalizedUrl)
-        } catch (_: Exception) {
-            StreamingService.LinkType.NONE
-        }
-
-        return when (linkType) {
-            StreamingService.LinkType.PLAYLIST -> loadPlaylist(normalizedUrl)
-            StreamingService.LinkType.CHANNEL -> loadChannel(normalizedUrl)
-            StreamingService.LinkType.STREAM -> loadStream(normalizedUrl)
-            StreamingService.LinkType.NONE -> null
+        return when {
+            normalizedUrl.contains("/playlist?list=") ||
+                (normalizedUrl.contains("/watch?v=") && normalizedUrl.contains("&list=")) ->
+                loadPlaylist(normalizedUrl)
+            normalizedUrl.contains("/channel/") ||
+                normalizedUrl.contains("/@") ||
+                normalizedUrl.contains("/c/") ||
+                normalizedUrl.contains("/user/") ->
+                loadChannel(normalizedUrl)
+            else -> loadStream(normalizedUrl)
         }
     }
 
     private suspend fun loadStream(url: String): LoadResponse? {
         val info = try {
-            StreamInfo.getInfo(url)
-        } catch (_: Exception) {
+            val extractor = service.getStreamExtractor(url)
+            extractor.fetchPage()
+            StreamInfo.getInfo(extractor)
+        } catch (_: Throwable) {
             return null
         }
 
-        val poster = bestImageUrl(info.thumbnails)
-        val channelAvatar = bestImageUrl(info.uploaderAvatars)
-        val plotText = info.description?.content?.takeIf { it.isNotBlank() }
-        val releaseYear = info.uploadDate?.offsetDateTime()?.year
-        val runtimeMinutes = (info.duration / 60).toInt().takeIf { it > 0 }
-        val creatorActors = info.uploaderName
-            ?.takeIf { it.isNotBlank() }
-            ?.let { listOf(ActorData(Actor(it, image = channelAvatar))) }
-        val related = info.relatedItems
-            .mapNotNull { it.toSearchResponse() }
-            .distinctBy { it.url }
+        val poster = safeGet { bestImageUrl(info.thumbnails) }
+        val channelAvatar = safeGet { bestImageUrl(info.uploaderAvatars) }
+        val plotText = safeGet { info.description?.content?.takeIf { it.isNotBlank() } }
+        val releaseYear = safeGet {
+            val dateText = info.textualUploadDate
+            if (!dateText.isNullOrBlank()) {
+                Regex("\\b(19\\d{2}|20\\d{2})\\b").find(dateText)?.value?.toIntOrNull()
+            } else {
+                null
+            }
+        }
+        val runtimeMinutes = safeGet { (info.duration / 60).toInt().takeIf { it > 0 } }
+        val tagList = safeGet { info.tags?.take(8)?.takeIf { it.isNotEmpty() } }
+        val creatorActors = safeGet {
+            info.uploaderName
+                ?.takeIf { it.isNotBlank() }
+                ?.let { listOf(ActorData(Actor(it, image = channelAvatar))) }
+        }
+        val related = safeGet {
+            info.relatedItems
+                .mapNotNull { it.toSearchResponse() }
+                .distinctBy { it.url }
+        }
 
-        val isLive = info.streamType == StreamType.LIVE_STREAM ||
-            info.streamType == StreamType.AUDIO_LIVE_STREAM
+        val isLive = safeGet {
+            info.streamType == StreamType.LIVE_STREAM ||
+                info.streamType == StreamType.AUDIO_LIVE_STREAM
+        } == true
 
         return if (isLive) {
             newLiveStreamLoadResponse(info.name, url, url) {
@@ -181,7 +192,7 @@ class YouTubeProvider : MainAPI() {
                 backgroundPosterUrl = poster
                 plot = plotText
                 year = releaseYear
-                tags = info.tags?.takeIf { it.isNotEmpty() }
+                tags = tagList
                 actors = creatorActors
                 recommendations = related
             }
@@ -192,7 +203,7 @@ class YouTubeProvider : MainAPI() {
                 plot = plotText
                 year = releaseYear
                 duration = runtimeMinutes
-                tags = info.tags?.takeIf { it.isNotEmpty() }
+                tags = tagList
                 actors = creatorActors
                 recommendations = related
             }
@@ -200,55 +211,63 @@ class YouTubeProvider : MainAPI() {
     }
 
     private suspend fun loadPlaylist(url: String): LoadResponse? {
-        val info = try {
-            PlaylistInfo.getInfo(url)
-        } catch (_: Exception) {
+        val extractor = try {
+            service.getPlaylistExtractor(url).apply { fetchPage() }
+        } catch (_: Throwable) {
             return null
         }
 
-        val episodes = info.relatedItems.mapIndexed { index, item ->
+        val items = try {
+            extractor.initialPage.items
+        } catch (_: Throwable) {
+            emptyList()
+        }
+
+        val episodes = items.mapIndexed { index, item ->
             newEpisode(item.url) {
                 name = item.name
                 season = 1
                 episode = index + 1
-                posterUrl = bestImageUrl(item.thumbnails)
-                runTime = (item.duration / 60).toInt().takeIf { it > 0 }
-                description = item.uploaderName?.takeIf { it.isNotBlank() }
+                posterUrl = safeGet { bestImageUrl(item.thumbnails) }
+                runTime = safeGet { (item.duration / 60).toInt().takeIf { it > 0 } }
+                description = safeGet { item.uploaderName?.takeIf { it.isNotBlank() } }
             }
         }
 
-        val poster = bestImageUrl(info.thumbnails)
+        val poster = safeGet { bestImageUrl(extractor.thumbnails) }
             ?: episodes.firstOrNull()?.posterUrl
-        val banner = bestImageUrl(info.banners) ?: poster
+        val banner = safeGet { bestImageUrl(extractor.banners) } ?: poster
+        val uploader = safeGet { extractor.uploaderName?.takeIf { it.isNotBlank() } }
+        val uploaderAvatar = safeGet { bestImageUrl(extractor.uploaderAvatars) }
 
-        return newTvSeriesLoadResponse(info.name, url, TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(extractor.name, url, TvType.TvSeries, episodes) {
             posterUrl = poster
             backgroundPosterUrl = banner
-            plot = info.description?.content?.takeIf { it.isNotBlank() }
-                ?: info.uploaderName?.let { "Playlist by $it" }
-            actors = info.uploaderName
-                ?.takeIf { it.isNotBlank() }
-                ?.let { listOf(ActorData(Actor(it, image = bestImageUrl(info.uploaderAvatars)))) }
+            plot = safeGet { extractor.description?.content?.takeIf { it.isNotBlank() } }
+                ?: uploader?.let { "Playlist by $it" }
+            actors = uploader?.let { listOf(ActorData(Actor(it, image = uploaderAvatar))) }
         }
     }
 
     private suspend fun loadChannel(url: String): LoadResponse? {
-        val info = try {
-            ChannelInfo.getInfo(url)
-        } catch (_: Exception) {
+        val extractor = try {
+            service.getChannelExtractor(url).apply { fetchPage() }
+        } catch (_: Throwable) {
             return null
         }
 
-        val videosTab = info.tabs.firstOrNull { tab ->
-            tab.contentFilters.contains(ChannelTabs.VIDEOS)
-        } ?: info.tabs.firstOrNull()
+        val tabs = safeGet { extractor.tabs } ?: emptyList()
+        val videosTab = tabs.firstOrNull { tab ->
+            safeGet { tab.contentFilters.contains(ChannelTabs.VIDEOS) } == true ||
+                tab.url.contains("/videos")
+        } ?: tabs.firstOrNull()
 
         val videoItems = if (videosTab != null) {
             try {
-                ChannelTabInfo.getInfo(service, videosTab)
-                    .relatedItems
-                    .filterIsInstance<StreamInfoItem>()
-            } catch (_: Exception) {
+                val tabExtractor = service.getChannelTabExtractor(videosTab)
+                tabExtractor.fetchPage()
+                tabExtractor.initialPage.items.filterIsInstance<StreamInfoItem>()
+            } catch (_: Throwable) {
                 emptyList()
             }
         } else {
@@ -260,20 +279,20 @@ class YouTubeProvider : MainAPI() {
                 name = item.name
                 season = 1
                 episode = index + 1
-                posterUrl = bestImageUrl(item.thumbnails)
-                runTime = (item.duration / 60).toInt().takeIf { it > 0 }
-                description = item.textualUploadDate?.takeIf { it.isNotBlank() }
+                posterUrl = safeGet { bestImageUrl(item.thumbnails) }
+                runTime = safeGet { (item.duration / 60).toInt().takeIf { it > 0 } }
+                description = safeGet { item.textualUploadDate?.takeIf { it.isNotBlank() } }
             }
         }
 
-        val avatar = bestImageUrl(info.avatars)
-        val banner = bestImageUrl(info.banners) ?: avatar
+        val avatar = safeGet { bestImageUrl(extractor.avatars) }
+        val banner = safeGet { bestImageUrl(extractor.banners) } ?: avatar
 
-        return newTvSeriesLoadResponse(info.name, url, TvType.TvSeries, episodes) {
+        return newTvSeriesLoadResponse(extractor.name, url, TvType.TvSeries, episodes) {
             posterUrl = avatar
             backgroundPosterUrl = banner
-            plot = info.description?.takeIf { it.isNotBlank() }
-            tags = info.tags?.takeIf { it.isNotEmpty() }
+            plot = safeGet { extractor.description?.takeIf { it.isNotBlank() } }
+            tags = safeGet { extractor.tags?.take(8)?.takeIf { it.isNotEmpty() } }
         }
     }
 
@@ -288,7 +307,7 @@ class YouTubeProvider : MainAPI() {
         // Delegate first to CloudStream's built-in YoutubeExtractor (supports video-only+audio, live HLS, subtitles)
         val extracted = try {
             loadExtractor(watchUrl, subtitleCallback, callback)
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             false
         }
 
@@ -296,14 +315,16 @@ class YouTubeProvider : MainAPI() {
 
         // Fallback: inspect public StreamInfo directly for muxed progressive streams or live HLS
         val info = try {
-            StreamInfo.getInfo(watchUrl)
-        } catch (_: Exception) {
+            val extractor = service.getStreamExtractor(watchUrl)
+            extractor.fetchPage()
+            StreamInfo.getInfo(extractor)
+        } catch (_: Throwable) {
             return false
         }
 
         var emitted = false
 
-        val hlsUrl = info.hlsUrl
+        val hlsUrl = safeGet { info.hlsUrl }
         if (!hlsUrl.isNullOrBlank()) {
             callback(
                 newExtractorLink(
@@ -317,7 +338,7 @@ class YouTubeProvider : MainAPI() {
             emitted = true
         }
 
-        info.videoStreams.forEach { stream ->
+        safeGet { info.videoStreams }?.forEach { stream ->
             val streamUrl = stream.content
             if (!streamUrl.isNullOrBlank()) {
                 callback(
@@ -333,7 +354,7 @@ class YouTubeProvider : MainAPI() {
             }
         }
 
-        info.subtitles.forEach { subtitle ->
+        safeGet { info.subtitles }?.forEach { subtitle ->
             val subUrl = subtitle.content
             if (!subUrl.isNullOrBlank()) {
                 subtitleCallback(
@@ -353,12 +374,14 @@ class YouTubeProvider : MainAPI() {
     private fun InfoItem.toSearchResponse(): SearchResponse? {
         val itemUrl = url?.takeIf { it.isNotBlank() } ?: return null
         val itemName = name?.takeIf { it.isNotBlank() } ?: return null
-        val poster = bestImageUrl(thumbnails)
+        val poster = safeGet { bestImageUrl(thumbnails) }
 
         return when (this) {
             is StreamInfoItem -> {
-                val isLive = streamType == StreamType.LIVE_STREAM ||
-                    streamType == StreamType.AUDIO_LIVE_STREAM
+                val isLive = safeGet {
+                    streamType == StreamType.LIVE_STREAM ||
+                        streamType == StreamType.AUDIO_LIVE_STREAM
+                } == true
                 if (isLive) {
                     newLiveSearchResponse(itemName, itemUrl, TvType.Live) {
                         posterUrl = poster
@@ -382,5 +405,13 @@ class YouTubeProvider : MainAPI() {
     private fun bestImageUrl(images: List<Image>?): String? {
         if (images.isNullOrEmpty()) return null
         return images.maxByOrNull { it.height }?.url ?: images.lastOrNull()?.url
+    }
+
+    private inline fun <T> safeGet(block: () -> T): T? {
+        return try {
+            block()
+        } catch (_: Throwable) {
+            null
+        }
     }
 }
