@@ -99,6 +99,31 @@
         "jarHash": "sha256-d6d12d4488b78dbf4f2f6752e8df3382b2fa5fa906c12e106dbcb0e98f22537c"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=reanime.cz&sz=%size%",
+        "jarFileSize": 166428,
+        "fileHash": "sha256-5bd7d1e6c7df22e381072945694c41d485df4407c5f0fe583d5bb201ce84e87c",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 47935,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "ReAnimeProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/ReAnimeProvider.jar",
+        "description": "Watch subbed and dubbed anime series, movies, and OVAs on Re:ANIME (reanime.cz)",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/ReAnimeProvider.cs3",
+        "name": "ReAnimeProvider",
+        "jarHash": "sha256-614477861383f6eed33244153ecd9c9a494672dda018553096a2fcc7ea03b3e8"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.youtube.com&sz=%size%",
         "jarFileSize": 85291,
         "fileHash": "sha256-275e034aadb8ce4a317d28f01d03d8663b77fdb19ee1ae8d26e0096de246a776",
