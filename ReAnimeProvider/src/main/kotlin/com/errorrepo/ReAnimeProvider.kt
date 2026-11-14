@@ -12,7 +12,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.delay
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLDecoder
@@ -39,6 +38,12 @@ class ReAnimeProvider : MainAPI() {
         "User-Agent" to USER_AGENT,
         "Referer" to "$mainUrl/",
         "Accept" to "application/json, text/plain, */*"
+    )
+
+    private val flixProbeHeaders = mapOf(
+        "User-Agent" to USER_AGENT,
+        "Referer" to "$flixHost/",
+        "Range" to "bytes=0-1"
     )
 
     // Stores next_cursor per cursor-based feed and page number
@@ -79,6 +84,17 @@ class ReAnimeProvider : MainAPI() {
         val hasSub: Boolean,
         val hasDub: Boolean
     )
+
+    private sealed class ProbeOutcome {
+        object EMITTED : ProbeOutcome()
+        object FAILED : ProbeOutcome()
+        data class Building202(
+            val srv: FlixServer,
+            val finalUrl: String,
+            val resolution: String,
+            val sizeHuman: String
+        ) : ProbeOutcome()
+    }
 
     override suspend fun getMainPage(
         page: Int,
@@ -416,6 +432,7 @@ class ReAnimeProvider : MainAPI() {
             if (serversNode != null && serversNode.isArray && serversNode.size() > 0) {
                 val grouped = groupFlixServers(serversNode)
                 val fetchedSubKeys = HashSet<String>()
+                val pending202 = mutableListOf<ProbeOutcome.Building202>()
 
                 for (srv in grouped) {
                     val embedReferer = "$flixHost/e/${srv.aid}?v=${srv.instance}"
@@ -426,9 +443,24 @@ class ReAnimeProvider : MainAPI() {
                     }
 
                     // Fetch direct MKV/MP4 download stream from /d/{aid}/__data.json?v={instance}
-                    val ok = fetchFlixDirectStream(srv, embedReferer, emittedAny, callback)
-                    if (ok) {
-                        emittedAny = true
+                    val result = resolveAndProbeFlixStream(srv, embedReferer, callback)
+                    when (result) {
+                        ProbeOutcome.EMITTED -> emittedAny = true
+                        is ProbeOutcome.Building202 -> pending202.add(result)
+                        ProbeOutcome.FAILED -> Unit
+                    }
+                }
+
+                // Retry HTTP 202 (cache building) servers only if no ready stream was emitted yet
+                if (!emittedAny && pending202.isNotEmpty()) {
+                    for (round in 1..2) {
+                        for (pending in pending202) {
+                            if (probeFlixUrlOnce(pending.finalUrl)) {
+                                emitFlixLink(pending.srv, pending.finalUrl, pending.resolution, pending.sizeHuman, callback)
+                                emittedAny = true
+                            }
+                        }
+                        if (emittedAny) break
                     }
                 }
             }
@@ -621,12 +653,11 @@ class ReAnimeProvider : MainAPI() {
         }
     }
 
-    private suspend fun fetchFlixDirectStream(
+    private suspend fun resolveAndProbeFlixStream(
         srv: FlixServer,
         embedReferer: String,
-        alreadyHasLink: Boolean,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    ): ProbeOutcome {
         val raw = try {
             app.get(
                 "$flixHost/d/${srv.aid}/__data.json?v=${srv.instance}",
@@ -636,7 +667,7 @@ class ReAnimeProvider : MainAPI() {
                 )
             ).text
         } catch (_: Exception) {
-            return false
+            return ProbeOutcome.FAILED
         }
 
         val nodes = decodeSvelteNodes(raw)
@@ -658,43 +689,50 @@ class ReAnimeProvider : MainAPI() {
             }
         }
 
-        val finalUrl = downloadUrl ?: return false
-
-        // Verify the stream is actually ready (cached -> 206 video/x-matroska; building -> 202 JSON)
-        val probeHeaders = mapOf(
-            "User-Agent" to USER_AGENT,
-            "Referer" to "$flixHost/",
-            "Range" to "bytes=0-1"
-        )
-
-        var ready = false
-        val maxAttempts = if (alreadyHasLink) 1 else 3
-        for (attempt in 0 until maxAttempts) {
-            if (attempt > 0) {
-                delay(2500L)
-            }
-            val probe = try {
-                app.get(finalUrl, headers = probeHeaders)
-            } catch (_: Exception) {
-                null
-            } ?: continue
-
-            val ct = (probe.headers["Content-Type"] ?: probe.headers["content-type"]).orEmpty()
-            if (probe.code in 200..299 &&
-                probe.code != 202 &&
-                !ct.contains("json", ignoreCase = true) &&
-                !ct.contains("text/html", ignoreCase = true)
-            ) {
-                ready = true
-                break
-            }
-            if (probe.code != 202) {
-                break
-            }
+        val finalUrl = downloadUrl ?: return ProbeOutcome.FAILED
+        val probe = try {
+            app.get(finalUrl, headers = flixProbeHeaders)
+        } catch (_: Exception) {
+            return ProbeOutcome.FAILED
         }
 
-        if (!ready) return false
+        val ct = (probe.headers["Content-Type"] ?: probe.headers["content-type"]).orEmpty()
+        if (probe.code in 200..299 &&
+            probe.code != 202 &&
+            !ct.contains("json", ignoreCase = true) &&
+            !ct.contains("text/html", ignoreCase = true)
+        ) {
+            emitFlixLink(srv, finalUrl, resolution, sizeHuman, callback)
+            return ProbeOutcome.EMITTED
+        }
 
+        return if (probe.code == 202) {
+            ProbeOutcome.Building202(srv, finalUrl, resolution, sizeHuman)
+        } else {
+            ProbeOutcome.FAILED
+        }
+    }
+
+    private suspend fun probeFlixUrlOnce(finalUrl: String): Boolean {
+        val probe = try {
+            app.get(finalUrl, headers = flixProbeHeaders)
+        } catch (_: Exception) {
+            return false
+        }
+        val ct = (probe.headers["Content-Type"] ?: probe.headers["content-type"]).orEmpty()
+        return probe.code in 200..299 &&
+            probe.code != 202 &&
+            !ct.contains("json", ignoreCase = true) &&
+            !ct.contains("text/html", ignoreCase = true)
+    }
+
+    private suspend fun emitFlixLink(
+        srv: FlixServer,
+        finalUrl: String,
+        resolution: String,
+        sizeHuman: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
         val audioBadge = when {
             srv.hardsub -> "Hardsub"
             srv.hasSub && srv.hasDub -> "Sub + Dub"
@@ -702,12 +740,12 @@ class ReAnimeProvider : MainAPI() {
             srv.hasSub -> "Sub"
             else -> ""
         }
-        val labelParts = buildList {
-            add(name)
-            add(srv.serverName)
-            if (audioBadge.isNotEmpty()) add(audioBadge)
-            if (sizeHuman.isNotEmpty()) add(sizeHuman)
-        }
+        val labelParts = listOfNotNull(
+            name,
+            srv.serverName,
+            audioBadge.takeIf { it.isNotEmpty() },
+            sizeHuman.takeIf { it.isNotEmpty() }
+        )
 
         callback(
             newExtractorLink(
@@ -720,7 +758,6 @@ class ReAnimeProvider : MainAPI() {
                 this.quality = getQualityFromName(resolution)
             }
         )
-        return true
     }
 
     /**
@@ -771,7 +808,7 @@ class ReAnimeProvider : MainAPI() {
                 val fields = raw.fields()
                 while (fields.hasNext()) {
                     val entry = fields.next()
-                    obj.set<JsonNode>(
+                    obj.replace(
                         entry.key,
                         resolveDevalueValue(entry.value, dataArr, memo, visiting, depth + 1)
                     )
@@ -809,7 +846,7 @@ class ReAnimeProvider : MainAPI() {
                 val fields = raw.fields()
                 while (fields.hasNext()) {
                     val entry = fields.next()
-                    obj.set<JsonNode>(
+                    obj.replace(
                         entry.key,
                         resolveDevalueValue(entry.value, dataArr, memo, visiting, depth + 1)
                     )
