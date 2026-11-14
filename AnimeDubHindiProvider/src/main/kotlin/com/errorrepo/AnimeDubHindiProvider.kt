@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.nodes.Node
 import org.jsoup.nodes.TextNode
 import java.net.URI
 import java.net.URLDecoder
@@ -136,7 +137,7 @@ class AnimeDubHindiProvider : MainAPI() {
         val rawTitle = doc.selectFirst("h1.entry-title, h1")?.text()?.trim()?.ifBlank { null }
             ?: return null
 
-        val contentEl = doc.selectFirst("div.entry-content") ?: return null
+        val contentEl = doc.selectFirst("div.entry-content") ?: doc.body()
 
         val poster = contentEl.selectFirst("figure.wp-block-image img").extractImageUrl()
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()?.ifBlank { null }
@@ -190,6 +191,9 @@ class AnimeDubHindiProvider : MainAPI() {
         val adhlinksUrl = contentEl.select("a[href*='adhlinks']")
             .mapNotNull { it.attr("href").trim().ifBlank { null } }
             .firstOrNull()
+            ?: doc.select("a[href*='adhlinks']")
+                .mapNotNull { it.attr("href").trim().ifBlank { null } }
+                .firstOrNull()
             ?: return null
 
         val adhHeaders = mapOf(
@@ -272,13 +276,25 @@ class AnimeDubHindiProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val links = decodeLinkPayload(data)
-        if (links.isEmpty()) return false
+        val rawLinks = decodeLinkPayload(data)
+        if (rawLinks.isEmpty()) return false
+
+        // Prioritize HubCloud (10Gbps Google CDN & R2 FSL) before Multi (workers.dev)
+        val sortedLinks = rawLinks.sortedBy { item ->
+            val u = item.url.lowercase()
+            val l = item.label.lowercase()
+            when {
+                u.contains("hubcloud") || l == "hcloud" || l == "hubcloud" -> 0
+                u.contains("/re.php?") || u.contains("filesforever.link") ||
+                    u.contains("pro.iqsmartgames.com") || l == "multi" -> 1
+                else -> 2
+            }
+        }
 
         var emitted = false
         val seenUrls = mutableSetOf<String>()
 
-        for (item in links) {
+        for (item in sortedLinks) {
             val linkUrl = item.url.trim()
             if (linkUrl.isEmpty() || !seenUrls.add(linkUrl)) continue
 
@@ -298,15 +314,18 @@ class AnimeDubHindiProvider : MainAPI() {
                     linkUrl.contains("filesforever.link", ignoreCase = true) ||
                     linkUrl.contains("pro.iqsmartgames.com", ignoreCase = true) ||
                     labelLower == "multi" -> {
-                    if (resolveMultiLink(linkUrl, qualityLabel, callback)) {
+                    if (resolveMultiLink(linkUrl, qualityLabel, subtitleCallback, callback)) {
                         emitted = true
                     }
                 }
 
-                // Skip ad-shortener MEGA links and external index pages
-                linkUrl.contains("/redirect.php?", ignoreCase = true) ||
+                // Skip broken Drive placeholders, ad-shorteners, and non-embed pages
+                linkUrl.contains("/uc?", ignoreCase = true) ||
+                    linkUrl.contains("/redirect.php?", ignoreCase = true) ||
                     linkUrl.contains("desidubanime.me", ignoreCase = true) ||
+                    linkUrl.contains("t.me/", ignoreCase = true) ||
                     labelLower == "mega" ||
+                    labelLower == "gd" ||
                     labelLower == "click here" -> Unit
 
                 else -> {
@@ -342,6 +361,7 @@ class AnimeDubHindiProvider : MainAPI() {
                 it.contains("hubcloud.php", ignoreCase = true) ||
                     it.contains("gamerxyt.com", ignoreCase = true)
             }
+            ?: step1Doc.selectFirst("a#download[href]")?.attr("href")?.trim()?.ifBlank { null }
             ?: return false
 
         val step2Headers = mapOf(
@@ -355,57 +375,94 @@ class AnimeDubHindiProvider : MainAPI() {
         }
 
         val parsedQuality = parseQualityFromText(qualityLabel)
-        val step2Origin = extractOrigin(hubPhpUrl) ?: "https://gamerxyt.com"
         var emitted = false
         val emittedStreams = mutableSetOf<String>()
 
-        for (anchor in step2Doc.select("a[href]")) {
+        val anchors = step2Doc.select("a[href]")
+
+        // 1. Try 10Gbps Server (pixel.hubcloud.pw / gpdl.hubcloud.pw -> video-downloads.googleusercontent.com)
+        for (anchor in anchors) {
             val href = anchor.attr("href").trim()
-            if (href.isEmpty()) continue
             val text = anchor.text().trim()
-
-            when {
-                href.contains("r2.cloudflarestorage.com", ignoreCase = true) ||
-                    (text.contains("FSL", ignoreCase = true) && href.startsWith("http")) -> {
-                    if (emittedStreams.add(href)) {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "$name FSL [$qualityLabel]",
-                                url = href,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.quality = parsedQuality
-                                this.referer = "$step2Origin/"
-                            }
-                        )
-                        emitted = true
-                    }
+            if (href.contains("pixel.hubcloud.", ignoreCase = true) ||
+                href.contains("gpdl.hubcloud.", ignoreCase = true) ||
+                text.contains("10Gbps", ignoreCase = true)
+            ) {
+                val resolvedGoogleUrl = resolveHubCloud10Gbps(href, hubPhpUrl)
+                if (resolvedGoogleUrl != null && emittedStreams.add(resolvedGoogleUrl)) {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name 10Gbps [$qualityLabel]",
+                            url = resolvedGoogleUrl,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = parsedQuality
+                            this.referer = ""
+                        }
+                    )
+                    emitted = true
                 }
+            }
+        }
 
-                href.contains("hbplay.pages.dev", ignoreCase = true) -> {
-                    val encodedStream = extractQueryParam(href, "u")
-                    val decodedStream = encodedStream?.let { decodeBase64(it) }?.trim()
-                    if (!decodedStream.isNullOrBlank() &&
-                        decodedStream.startsWith("http") &&
-                        emittedStreams.add(decodedStream)
-                    ) {
-                        callback(
-                            newExtractorLink(
-                                source = name,
-                                name = "$name HBPlay [$qualityLabel]",
-                                url = decodedStream,
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.quality = parsedQuality
-                                this.referer = "https://hbplay.pages.dev/"
-                            }
-                        )
-                        emitted = true
-                    }
+        // 2. Try FSL Server (r2.cloudflarestorage.com) — probe 1 byte to avoid dead 403 buckets
+        for (anchor in anchors) {
+            val href = anchor.attr("href").trim()
+            val text = anchor.text().trim()
+            if (href.contains("r2.cloudflarestorage.com", ignoreCase = true) ||
+                (text.contains("FSL", ignoreCase = true) && href.startsWith("http"))
+            ) {
+                if (emittedStreams.add(href) && probeRangeByte(href)) {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name FSL [$qualityLabel]",
+                            url = href,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = parsedQuality
+                            this.referer = ""
+                        }
+                    )
+                    emitted = true
                 }
+            }
+        }
 
-                href.contains("pixeldrain.", ignoreCase = true) -> {
+        // 3. Try HBPlay decoded stream if distinct and alive
+        for (anchor in anchors) {
+            val href = anchor.attr("href").trim()
+            if (href.contains("hbplay.pages.dev", ignoreCase = true)) {
+                val encodedStream = extractQueryParam(href, "u")
+                val decodedStream = encodedStream?.let { decodeBase64(it) }?.trim()
+                if (!decodedStream.isNullOrBlank() &&
+                    decodedStream.startsWith("http") &&
+                    emittedStreams.add(decodedStream) &&
+                    probeRangeByte(decodedStream)
+                ) {
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = "$name HBPlay [$qualityLabel]",
+                            url = decodedStream,
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = parsedQuality
+                            this.referer = ""
+                        }
+                    )
+                    emitted = true
+                }
+            }
+        }
+
+        // 4. Try PixelDrain ONLY if /api/file/<id>/info returns HTTP 200 (skip dead 404 placeholders like negn6f)
+        for (anchor in anchors) {
+            val href = anchor.attr("href").trim()
+            if (href.contains("pixeldrain.", ignoreCase = true)) {
+                val fileId = Regex("/u/([A-Za-z0-9]+)").find(href)?.groupValues?.get(1) ?: continue
+                if (isPixelDrainAlive(fileId)) {
                     if (loadExtractor(href, hubPhpUrl, subtitleCallback, callback)) {
                         emitted = true
                     }
@@ -416,9 +473,108 @@ class AnimeDubHindiProvider : MainAPI() {
         return emitted
     }
 
+    private suspend fun resolveHubCloud10Gbps(startUrl: String, referer: String): String? {
+        var currentUrl = startUrl
+        var currentReferer = referer
+
+        for (hop in 0 until 6) {
+            val extractedLink = extractGoogleVideoUrl(currentUrl)
+            if (extractedLink != null) return extractedLink
+
+            val res = try {
+                app.get(
+                    currentUrl,
+                    headers = mapOf(
+                        "User-Agent" to USER_AGENT,
+                        "Referer" to currentReferer
+                    ),
+                    allowRedirects = false
+                )
+            } catch (_: Exception) {
+                return null
+            }
+
+            val location = (res.headers["Location"] ?: res.headers["location"])?.trim()
+            if (!location.isNullOrBlank()) {
+                val absLocation = resolveRelativeUrl(location, extractOrigin(currentUrl) ?: "https://hubcloud.pw")
+                    ?: return null
+                val googleFromLoc = extractGoogleVideoUrl(absLocation)
+                if (googleFromLoc != null) return googleFromLoc
+                currentReferer = currentUrl
+                currentUrl = absLocation
+                continue
+            }
+
+            if (res.code in 200..299) {
+                val ct = (res.headers["Content-Type"] ?: res.headers["content-type"]).orEmpty()
+                if (ct.contains("video/", ignoreCase = true) || ct.contains("octet-stream", ignoreCase = true)) {
+                    return currentUrl
+                }
+                val bodyGoogleUrl = extractGoogleVideoUrl(res.text)
+                if (bodyGoogleUrl != null) return bodyGoogleUrl
+            }
+            break
+        }
+        return null
+    }
+
+    private fun extractGoogleVideoUrl(text: String): String? {
+        val linkParam = extractQueryParam(text, "link")
+        if (!linkParam.isNullOrBlank() && linkParam.contains("video-downloads.googleusercontent.com", ignoreCase = true)) {
+            return linkParam.trim()
+        }
+        val regexMatch = Regex("""https://video-downloads\.googleusercontent\.com/[^\s"'<>]+""")
+            .find(text)?.value?.trim()
+        return regexMatch?.replace("&amp;", "&")
+    }
+
+    private suspend fun isPixelDrainAlive(fileId: String): Boolean {
+        return try {
+            val res = app.get(
+                "https://pixeldrain.dev/api/file/$fileId/info",
+                headers = mapOf("User-Agent" to USER_AGENT)
+            )
+            res.code == 200 && res.text.contains("\"success\":true")
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun probeRangeByte(url: String): Boolean {
+        return try {
+            val res = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to USER_AGENT,
+                    "Range" to "bytes=0-0"
+                ),
+                allowRedirects = true
+            )
+            val ct = (res.headers["Content-Type"] ?: res.headers["content-type"]).orEmpty()
+            res.code in 200..299 && !ct.contains("text/html", ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private suspend fun probeHead(url: String): Boolean {
+        return try {
+            val res = app.head(
+                url,
+                headers = mapOf("User-Agent" to USER_AGENT),
+                allowRedirects = true
+            )
+            val ct = (res.headers["Content-Type"] ?: res.headers["content-type"]).orEmpty()
+            res.code in 200..299 && !ct.contains("text/html", ignoreCase = true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private suspend fun resolveMultiLink(
         rawUrl: String,
         qualityLabel: String,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var targetUrl = rawUrl
@@ -447,35 +603,65 @@ class AnimeDubHindiProvider : MainAPI() {
         }
 
         val pageHtml = pageResponse.text
+        val parsedQuality = parseQualityFromText(qualityLabel)
+        var emitted = false
+
         val rawFileUrl = Regex("""const\s+fileurl\s*=\s*["']([^"']+)["']""")
             .find(pageHtml)?.groupValues?.get(1)
             ?.replace("\\/", "/")
             ?.trim()
-            ?: return false
 
-        if (!rawFileUrl.startsWith("http")) return false
+        if (!rawFileUrl.isNullOrBlank() && rawFileUrl.startsWith("http") && probeHead(rawFileUrl)) {
+            callback(
+                newExtractorLink(
+                    source = name,
+                    name = "$name Multi [$qualityLabel]",
+                    url = rawFileUrl,
+                    type = ExtractorLinkType.VIDEO
+                ) {
+                    this.quality = parsedQuality
+                    this.referer = ""
+                }
+            )
+            emitted = true
+        }
 
-        val origin = extractOrigin(pageResponse.url) ?: "https://pro.iqsmartgames.com"
-        val parsedQuality = parseQualityFromText(qualityLabel)
+        // Fallback: try embedded vpage streaming mirrors if direct fileurl was 404/unavailable
+        if (!emitted) {
+            val vpageDoc = pageResponse.document
+            val vpageHeaders = mapOf(
+                "User-Agent" to USER_AGENT,
+                "Referer" to pageResponse.url
+            )
+            val vpageLinks = vpageDoc.select("a[href*='/vpage?']")
+                .mapNotNull { it.attr("href").trim().ifBlank { null } }
+                .distinct()
+                .take(4)
 
-        callback(
-            newExtractorLink(
-                source = name,
-                name = "$name Multi [$qualityLabel]",
-                url = rawFileUrl,
-                type = ExtractorLinkType.VIDEO
-            ) {
-                this.quality = parsedQuality
-                this.referer = "$origin/"
+            for (vpUrl in vpageLinks) {
+                val resolvedTarget = try {
+                    app.get(vpUrl, headers = vpageHeaders).url
+                } catch (_: Exception) {
+                    continue
+                }
+                if (resolvedTarget.startsWith("http") &&
+                    !resolvedTarget.contains("iqsmartgames.com", ignoreCase = true)
+                ) {
+                    if (loadExtractor(resolvedTarget, pageResponse.url, subtitleCallback, callback)) {
+                        emitted = true
+                    }
+                }
             }
-        )
-        return true
+        }
+
+        return emitted
     }
 
     private fun parseMovieLinks(doc: Document, origin: String): List<ParsedLink> {
         val collected = mutableListOf<ParsedLink>()
 
-        doc.select("div.pro-ep-card").forEach { card ->
+        // Layout A: .pro-ep-card (matches both <div> and <details>)
+        doc.select(".pro-ep-card").forEach { card ->
             if (card.selectFirst("div.pro-zip-title") != null) return@forEach
             card.select("div.pro-quality-wrapper").forEach { wrapper ->
                 val quality = wrapper.selectFirst("span.pro-ep-quality")?.text()?.trim()
@@ -483,8 +669,8 @@ class AnimeDubHindiProvider : MainAPI() {
                 wrapper.select("div.pro-btn-group a[href]").forEach { a ->
                     val label = a.text().trim()
                     val href = resolveRelativeUrl(a.attr("href"), origin)
-                    if (label.isNotEmpty() && href != null) {
-                        collected.add(ParsedLink(quality = quality, label = label, url = href))
+                    if (isPlayableCandidate(label, href)) {
+                        collected.add(ParsedLink(quality = quality, label = label, url = href!!))
                     }
                 }
             }
@@ -492,18 +678,20 @@ class AnimeDubHindiProvider : MainAPI() {
 
         if (collected.isNotEmpty()) return collected
 
-        // Fallback for block-heading movie pages
-        doc.select("div.nv-content-wrap h4, div.entry-content h4").forEach { h4 ->
-            collected.addAll(parseInlineQualityLinks(h4, origin))
+        // Fallback: legacy heading/paragraph movie pages (e.g. <h2>480p:- ...</h2>)
+        val container = doc.selectFirst("div.nv-content-wrap, div.entry-content") ?: doc.body()
+        val qualityState = arrayOf("")
+        container.select("h2, h3, h4, p").forEach { block ->
+            collectLinksWithQuality(block, origin, collected, qualityState)
         }
         return collected
     }
 
     private fun parseSeriesEpisodes(doc: Document, origin: String): List<ParsedEpisodeBlock> {
-        // Layout A: .pro-ep-card containers
-        val cardEpisodes = doc.select("div.pro-ep-card").mapNotNull { card ->
+        // Layout A: .pro-ep-card (matches BOTH <div class="pro-ep-card"> and <details class="pro-ep-card">)
+        val cardEpisodes = doc.select(".pro-ep-card").mapNotNull { card ->
             if (card.selectFirst("div.pro-zip-title") != null) return@mapNotNull null
-            val epTitle = card.selectFirst("h4.pro-ep-title")?.text()?.trim()
+            val epTitle = card.selectFirst(".pro-ep-title")?.text()?.trim()
                 ?: return@mapNotNull null
             if (epTitle.contains("Zip Pack", ignoreCase = true)) return@mapNotNull null
 
@@ -517,8 +705,8 @@ class AnimeDubHindiProvider : MainAPI() {
                 wrapper.select("div.pro-btn-group a[href]").forEach { a ->
                     val label = a.text().trim()
                     val href = resolveRelativeUrl(a.attr("href"), origin)
-                    if (label.isNotEmpty() && href != null) {
-                        links.add(ParsedLink(quality = quality, label = label, url = href))
+                    if (isPlayableCandidate(label, href)) {
+                        links.add(ParsedLink(quality = quality, label = label, url = href!!))
                     }
                 }
             }
@@ -531,7 +719,7 @@ class AnimeDubHindiProvider : MainAPI() {
 
         // Layout B: WordPress wp-block-group containers with h2 + h4
         val seenTitles = mutableSetOf<String>()
-        return doc.select("div.wp-block-group").mapNotNull { group ->
+        val blockGroupEpisodes = doc.select("div.wp-block-group").mapNotNull { group ->
             val heading = group.selectFirst("h2.wp-block-heading, h2") ?: return@mapNotNull null
             val epTitle = heading.text().trim()
             if (!epTitle.contains("Episode", ignoreCase = true)) return@mapNotNull null
@@ -541,44 +729,95 @@ class AnimeDubHindiProvider : MainAPI() {
                 .find(epTitle)?.groupValues?.get(1)?.toIntOrNull()
 
             val bodyEl = group.selectFirst("h4.wp-block-heading, h4") ?: return@mapNotNull null
-            val links = parseInlineQualityLinks(bodyEl, origin)
+            val links = mutableListOf<ParsedLink>()
+            collectLinksWithQuality(bodyEl, origin, links, arrayOf(""))
             if (links.isEmpty()) return@mapNotNull null
 
             ParsedEpisodeBlock(title = epTitle, episodeNumber = epNum, links = links)
         }
+
+        if (blockGroupEpisodes.isNotEmpty()) return blockGroupEpisodes
+
+        // Layout C: Legacy flat heading pages (e.g. True Beauty: <h2>Episode: 01</h2> + sibling <h2>480P:- ...</h2>)
+        val container = doc.selectFirst("div.nv-content-wrap, div.entry-content") ?: doc.body()
+        val legacyEpisodes = mutableListOf<ParsedEpisodeBlock>()
+        var currentTitle: String? = null
+        var currentEpNum: Int? = null
+        var currentLinks = mutableListOf<ParsedLink>()
+        val qualityState = arrayOf("")
+        val epHeaderRegex = Regex("^\\s*(?:Episode|Ep)\\s*[:\\-]?\\s*(\\d+)", RegexOption.IGNORE_CASE)
+
+        for (el in container.select("h2, h3, h4, p")) {
+            val text = el.text().replace('\u00A0', ' ').trim()
+            if (text.isEmpty()) continue
+
+            val epMatch = epHeaderRegex.find(text)
+            if (epMatch != null && el.select("a[href]").isEmpty()) {
+                if (currentTitle != null && currentLinks.isNotEmpty()) {
+                    legacyEpisodes.add(ParsedEpisodeBlock(currentTitle, currentEpNum, currentLinks))
+                }
+                currentTitle = text
+                currentEpNum = epMatch.groupValues[1].toIntOrNull()
+                currentLinks = mutableListOf()
+                qualityState[0] = ""
+            } else if (currentTitle != null) {
+                collectLinksWithQuality(el, origin, currentLinks, qualityState)
+            }
+        }
+
+        if (currentTitle != null && currentLinks.isNotEmpty()) {
+            legacyEpisodes.add(ParsedEpisodeBlock(currentTitle, currentEpNum, currentLinks))
+        }
+
+        return legacyEpisodes
     }
 
-    private fun parseInlineQualityLinks(container: Element, origin: String): List<ParsedLink> {
-        val links = mutableListOf<ParsedLink>()
-        var currentQuality = ""
-
-        for (node in container.childNodes()) {
-            when (node) {
-                is TextNode -> {
-                    val text = node.text().replace('\u00A0', ' ').trim()
-                    if (text.contains("Watch online", ignoreCase = true)) {
-                        continue
-                    }
+    private fun collectLinksWithQuality(
+        node: Node,
+        origin: String,
+        out: MutableList<ParsedLink>,
+        qualityState: Array<String>
+    ) {
+        when (node) {
+            is TextNode -> {
+                val text = node.text().replace('\u00A0', ' ').trim()
+                if (text.isNotEmpty() && !text.contains("Watch online", ignoreCase = true)) {
                     val qualityMatch = Regex(
                         "(\\d{3,4}p(?:\\s*x26[45])?(?:\\s*10bit)?(?:\\s*HQ)?)",
                         RegexOption.IGNORE_CASE
                     ).find(text)
                     if (qualityMatch != null) {
-                        currentQuality = qualityMatch.groupValues[1].trim()
+                        qualityState[0] = qualityMatch.groupValues[1].trim()
                     }
                 }
-                is Element -> {
-                    if (node.tagName().equals("a", ignoreCase = true)) {
-                        val label = node.text().trim()
-                        val href = resolveRelativeUrl(node.attr("href"), origin)
-                        if (label.isNotEmpty() && href != null) {
-                            links.add(ParsedLink(quality = currentQuality, label = label, url = href))
-                        }
+            }
+            is Element -> {
+                if (node.tagName().equals("a", ignoreCase = true)) {
+                    val label = node.text().trim()
+                    val href = resolveRelativeUrl(node.attr("href"), origin)
+                    if (isPlayableCandidate(label, href)) {
+                        out.add(ParsedLink(quality = qualityState[0], label = label, url = href!!))
+                    }
+                } else {
+                    for (child in node.childNodes()) {
+                        collectLinksWithQuality(child, origin, out, qualityState)
                     }
                 }
             }
         }
-        return links
+    }
+
+    private fun isPlayableCandidate(label: String, href: String?): Boolean {
+        if (label.isBlank() || href.isNullOrBlank()) return false
+        val l = label.lowercase()
+        val u = href.lowercase()
+        if (l.contains("telegram") || l == "click here" || l == "mega" || l == "gd") return false
+        if (u.contains("t.me/") || u.contains("/contact-us") || u.contains("/uc?") ||
+            u.contains("/redirect.php?") || u.contains("desidubanime.me")
+        ) {
+            return false
+        }
+        return true
     }
 
     private fun parseArchiveCards(doc: Document): List<SearchResponse> {
