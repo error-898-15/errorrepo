@@ -24,6 +24,30 @@
         "jarHash": "sha256-852d10632372c9ab63e68815bc2c5ac2ea7759b40d0ba0138d092b45b35d6eb4"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animahd.com&sz=%size%",
+        "jarFileSize": 105670,
+        "fileHash": "sha256-436314809a9fabd6a4f41ba2593781ec0ff16a7bc459b16134f6e395278f3e1a",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 36643,
+        "status": 1,
+        "language": "hi",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie"
+        ],
+        "version": 1,
+        "internalName": "AnimeHdProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeHdProvider.jar",
+        "description": "Watch Hindi dubbed, multi-audio anime series and anime movies on AnimeHd (animahd.com)",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeHdProvider.cs3",
+        "name": "AnimeHdProvider",
+        "jarHash": "sha256-52f793803458ce5341b203f2e7e7478578d1fac6ffcf159bc565135bdad91d6d"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=animepahe.ch&sz=%size%",
         "jarFileSize": 104348,
         "fileHash": "sha256-452aee3f43472a8f5387c809dedf0947b80370c29be80d3d36cff4042f454a5c",
