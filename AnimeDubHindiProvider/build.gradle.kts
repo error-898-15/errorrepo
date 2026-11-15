@@ -22,3 +22,10 @@ cloudstream {
 
     isCrossPlatform = true
 }
+
+android {
+    namespace = "com.errorrepo.animedubhindi"
+    defaultConfig {
+        minSdk = 21
+    }
+}
