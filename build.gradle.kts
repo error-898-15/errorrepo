@@ -1,4 +1,7 @@
 import com.android.build.gradle.BaseExtension
+import com.lagradost.cloudstream3.gradle.CloudstreamExtension
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
 
 buildscript {
     repositories {
@@ -6,12 +9,10 @@ buildscript {
         mavenCentral()
         maven("https://jitpack.io")
     }
+
     dependencies {
-       classpath("com.android.tools.build:gradle:8.2.2")
-        // Pinned commit instead of the -SNAPSHOT the template ships with,
-        // since -SNAPSHOT no longer resolves on JitPack.
-        classpath("com.github.recloudstream:gradle:81b1d424d2")
-        // Matches the Kotlin version CloudStream's current stubs expect.
+        classpath("com.android.tools.build:gradle:8.7.3")
+        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.3.0")
     }
 }
@@ -24,8 +25,8 @@ allprojects {
     }
 }
 
-fun Project.cloudstream(configuration: com.lagradost.cloudstream3.gradle.CloudstreamExtension.() -> Unit) =
-    extensions.getByName<com.lagradost.cloudstream3.gradle.CloudstreamExtension>("cloudstream").configuration()
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
+    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
 
 fun Project.android(configuration: BaseExtension.() -> Unit) =
     extensions.getByName<BaseExtension>("android").configuration()
@@ -36,37 +37,47 @@ subprojects {
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
-        // Auto-fills from the GitHub repo this Action runs in â no edit needed.
-        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "")
+        setRepo(System.getenv("GITHUB_REPOSITORY") ?: "error-898-15/errorrepo")
     }
 
     android {
-        compileSdkVersion(33)
+        namespace = "com.errorrepo"
 
         defaultConfig {
             minSdk = 21
-            targetSdk = 33
+            compileSdkVersion(35)
+            targetSdk = 35
         }
 
         compileOptions {
-            sourceCompatibility = JavaVersion.VERSION_11
-            targetCompatibility = JavaVersion.VERSION_11
+            sourceCompatibility = JavaVersion.VERSION_1_8
+            targetCompatibility = JavaVersion.VERSION_1_8
+        }
+
+        tasks.withType<KotlinJvmCompile> {
+            compilerOptions {
+                jvmTarget.set(JvmTarget.JVM_1_8)
+                freeCompilerArgs.addAll(
+                    "-Xno-call-assertions",
+                    "-Xno-param-assertions",
+                    "-Xno-receiver-assertions"
+                )
+            }
         }
     }
 
-   dependencies {
+    dependencies {
         val implementation by configurations
-        val cloudstream by configurations
-        cloudstream("com.lagradost:cloudstream3:pre-release")
+
+        implementation("com.github.recloudstream.cloudstream:library:-SNAPSHOT")
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.11")
         implementation("org.jsoup:jsoup:1.18.3")
+        // Keep Jackson pinned at 2.13.1 for Android device compatibility
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
     }
+}
 
-    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
-        }
-    }
+tasks.register<Delete>("clean") {
+    delete(rootProject.layout.buildDirectory)
 }

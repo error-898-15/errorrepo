@@ -20,10 +20,3 @@ cloudstream {
 
     isCrossPlatform = true
 }
-
-android {
-    namespace = "com.errorrepo.animepahe"
-    defaultConfig {
-        minSdk = 21
-    }
-}

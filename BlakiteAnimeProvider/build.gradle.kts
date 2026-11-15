@@ -19,10 +19,3 @@ cloudstream {
     iconUrl = "https://www.google.com/s2/favicons?domain=www.blakiteanime.buzz&sz=%size%"
     isCrossPlatform = true
 }
-
-android {
-    namespace = "com.errorrepo.blakiteanime"
-    defaultConfig {
-        minSdk = 21
-    }
-}

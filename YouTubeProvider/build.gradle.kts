@@ -23,10 +23,3 @@ cloudstream {
     iconUrl = "https://www.google.com/s2/favicons?domain=www.youtube.com&sz=%size%"
     isCrossPlatform = true
 }
-
-android {
-    namespace = "com.errorrepo.youtube"
-    defaultConfig {
-        minSdk = 21
-    }
-}
