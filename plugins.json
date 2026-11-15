@@ -123,6 +123,31 @@
         "jarHash": "sha256-d6d12d4488b78dbf4f2f6752e8df3382b2fa5fa906c12e106dbcb0e98f22537c"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=just4anime.online&sz=%size%",
+        "jarFileSize": 133474,
+        "fileHash": "sha256-8a6881ecc7c4ed0d1124cd0543469f487b2f27834dfd82448f9f8330aa3163f7",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 43275,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "Just4AnimeProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/Just4AnimeProvider.jar",
+        "description": "Watch subbed and dubbed anime series, movies, and OVAs on Just4Anime (just4anime.online)",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/Just4AnimeProvider.cs3",
+        "name": "Just4AnimeProvider",
+        "jarHash": "sha256-a7307acf0e5c8d81cd2644d0f5a3fad5b84a6afde2cd4bb176cba22130e4f852"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=reanime.cz&sz=%size%",
         "jarFileSize": 166428,
         "fileHash": "sha256-5bd7d1e6c7df22e381072945694c41d485df4407c5f0fe583d5bb201ce84e87c",
