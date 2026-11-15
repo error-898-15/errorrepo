@@ -196,8 +196,10 @@ class AnimeHdProvider : MainAPI() {
         val apiUrl = "$mainUrl/wp-json/wp/v2/posts?search=$encodedQuery&_embed&per_page=20&page=$currentPage"
         val restResult = try {
             val res = app.get(apiUrl, headers = defaultHeaders)
+            val totalPages = (res.headers["X-WP-TotalPages"] ?: res.headers["x-wp-totalpages"])
+                ?.toIntOrNull() ?: 1
             when (res.code) {
-                200 -> parseWpSearchResponse(res.text, res.headers, currentPage)
+                200 -> parseWpSearchResponse(res.text, totalPages, currentPage)
                 400 -> newSearchResponseList(emptyList(), false)
                 else -> null
             }
@@ -242,7 +244,7 @@ class AnimeHdProvider : MainAPI() {
 
     private fun parseWpSearchResponse(
         jsonText: String,
-        headers: okhttp3.Headers,
+        totalPages: Int,
         currentPage: Int
     ): SearchResponseList? {
         val root = try {
@@ -275,10 +277,6 @@ class AnimeHdProvider : MainAPI() {
             )
         }
 
-        val totalPages = headers.entries
-            .firstOrNull { it.key.equals("X-WP-TotalPages", ignoreCase = true) }
-            ?.value?.toIntOrNull() ?: 1
-
         return newSearchResponseList(
             items.distinctBy { it.url },
             hasNext = items.isNotEmpty() && currentPage < totalPages
@@ -289,7 +287,8 @@ class AnimeHdProvider : MainAPI() {
         val malThumb = post.path("_mal_cached_thumb").asText("").trim()
         if (malThumb.startsWith("http")) return malThumb
 
-        val mediaNode = post.path("_embedded").path("wp:featuredmedia").firstOrNull() ?: return null
+        val mediaNode = post.path("_embedded").path("wp:featuredmedia").path(0)
+            .takeIf { !it.isMissingNode && !it.isNull } ?: return null
         val sizes = mediaNode.path("media_details").path("sizes")
         val mediumUrl = sizes.path("medium").path("source_url").asText("").trim()
         if (mediumUrl.startsWith("http")) return mediumUrl
