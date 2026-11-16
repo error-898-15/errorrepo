@@ -1,11 +1,11 @@
 [
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=animedrive.in&sz=%size%",
-        "jarFileSize": 163712,
-        "fileHash": "sha256-7b3f8afc27b509745da0f268c460e0bcdd1d54df71a110fbed0aba77091fd21f",
+        "jarFileSize": 179671,
+        "fileHash": "sha256-ad5084478c2f2b9b9d3f7f3657287de605854031f111a45e01ddfae8a37e5806",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/error-898-15/errorrepo",
-        "fileSize": 51485,
+        "fileSize": 55128,
         "status": 1,
         "language": "hi",
         "authors": [
@@ -15,13 +15,13 @@
             "Anime",
             "AnimeMovie"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "AnimeDriveProvider",
         "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeDriveProvider.jar",
         "description": "Watch Hindi dubbed, multi-audio anime series and anime movies on AnimeDrive (animedrive.in)",
         "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeDriveProvider.cs3",
         "name": "AnimeDriveProvider",
-        "jarHash": "sha256-1c03b0cdba1026bceca85150f39848497b33279d496fd0426245372fdf428103"
+        "jarHash": "sha256-d5626c826c38492bf7e82028949af0b32743c0ae1aa60bf746d7f7025e8f8fe5"
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.animedubhindi.link&sz=%size%",
