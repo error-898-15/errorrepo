@@ -34,6 +34,9 @@ class AnimeDriveProvider : MainAPI() {
         "Referer" to "$mainUrl/"
     )
 
+    @Volatile
+    private var cachedHubCookie: String? = null
+
     private data class ParsedLink(
         val quality: String,
         val host: String,
@@ -217,10 +220,8 @@ class AnimeDriveProvider : MainAPI() {
             ?.attr("href")?.trim()?.ifBlank { null }
             ?: contentEl.selectFirst("a[href*='link.animedrive.in']")
                 ?.attr("href")?.trim()?.ifBlank { null }
-            ?: return null
-
-        val linkHubDoc = fetchLinkHubDocument(linkHubUrl, pageUrl) ?: return null
-        val linkHubOrigin = extractOrigin(linkHubUrl) ?: linkHubBase
+            ?: doc.selectFirst("a[href*='link.animedrive.in']")
+                ?.attr("href")?.trim()?.ifBlank { null }
 
         val isMovie = articleEl?.hasClass("category-movies") == true ||
             seasonText?.contains("Movie", ignoreCase = true) == true ||
@@ -229,16 +230,17 @@ class AnimeDriveProvider : MainAPI() {
             Regex("\\bMovie\\b", RegexOption.IGNORE_CASE).containsMatchIn(rawTitle)
 
         val dubStatus = resolveDubStatus("$audioText $rawTitle")
+        val linkHubDoc = linkHubUrl?.let { fetchLinkHubDocument(it, pageUrl) }
+        val linkHubOrigin = linkHubUrl?.let { extractOrigin(it) } ?: linkHubBase
 
         if (isMovie) {
-            val movieLinks = parseMovieLinks(linkHubDoc, linkHubOrigin)
-            if (movieLinks.isEmpty()) return null
-            return newMovieLoadResponse(
-                displayTitle,
-                pageUrl,
-                TvType.AnimeMovie,
+            val movieLinks = linkHubDoc?.let { parseMovieLinks(it, linkHubOrigin) }.orEmpty()
+            val movieData = if (movieLinks.isNotEmpty()) {
                 encodeLinkPayload(movieLinks)
-            ) {
+            } else {
+                encodeHubFallbackPayload(linkHubUrl ?: pageUrl, isMovie = true, episodeNum = null)
+            }
+            return newMovieLoadResponse(displayTitle, pageUrl, TvType.AnimeMovie, movieData) {
                 posterUrl = poster
                 backgroundPosterUrl = poster
                 plot = plotText
@@ -249,9 +251,6 @@ class AnimeDriveProvider : MainAPI() {
             }
         }
 
-        val parsedEpisodes = parseSeriesEpisodes(linkHubDoc, linkHubOrigin)
-        if (parsedEpisodes.isEmpty()) return null
-
         val seasonNumber = extractSeasonNumber(seasonText ?: "$displayTitle $rawTitle")
         val resolvedStatus = when {
             articleEl?.hasClass("category-on-going") == true -> ShowStatus.Ongoing
@@ -261,17 +260,31 @@ class AnimeDriveProvider : MainAPI() {
             else -> null
         }
 
-        val episodes = parsedEpisodes
-            .sortedWith(compareBy({ it.episodeNumber ?: Int.MAX_VALUE }, { it.title }))
-            .mapIndexed { idx, ep ->
-                val epNum = ep.episodeNumber ?: (idx + 1)
-                newEpisode(encodeLinkPayload(ep.links)) {
-                    this.name = ep.title.ifBlank { "Episode $epNum" }
+        val parsedEpisodes = linkHubDoc?.let { parseSeriesEpisodes(it, linkHubOrigin) }.orEmpty()
+        val episodes = if (parsedEpisodes.isNotEmpty()) {
+            parsedEpisodes
+                .sortedWith(compareBy({ it.episodeNumber ?: Int.MAX_VALUE }, { it.title }))
+                .mapIndexed { idx, ep ->
+                    val epNum = ep.episodeNumber ?: (idx + 1)
+                    newEpisode(encodeLinkPayload(ep.links)) {
+                        this.name = ep.title.ifBlank { "Episode $epNum" }
+                        this.season = seasonNumber
+                        this.episode = epNum
+                        this.posterUrl = poster
+                    }
+                }
+        } else {
+            val epCount = extractEpisodeCountHint("$rawTitle ${episodesOrStatusText.orEmpty()}")
+            val targetHub = linkHubUrl ?: pageUrl
+            (1..epCount).map { epNum ->
+                newEpisode(encodeHubFallbackPayload(targetHub, isMovie = false, episodeNum = epNum)) {
+                    this.name = "Episode $epNum"
                     this.season = seasonNumber
                     this.episode = epNum
                     this.posterUrl = poster
                 }
             }
+        }
 
         return newAnimeLoadResponse(displayTitle, pageUrl, TvType.Anime) {
             posterUrl = poster
@@ -292,7 +305,7 @@ class AnimeDriveProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val rawLinks = decodeLinkPayload(data)
+        val rawLinks = resolveDataToLinks(data)
         if (rawLinks.isEmpty()) return false
 
         // Prioritize HubCloud and GDFlix (verified direct Google CDN / R2 streams) first
@@ -344,65 +357,125 @@ class AnimeDriveProvider : MainAPI() {
         return emitted
     }
 
-    private suspend fun fetchLinkHubDocument(linkHubUrl: String, refererUrl: String): Document? {
-        val directRes = try {
-            app.get(
-                linkHubUrl,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to refererUrl
-                )
-            )
-        } catch (_: Exception) {
-            null
-        }
+    private suspend fun resolveDataToLinks(data: String): List<ParsedLink> {
+        val trimmed = data.trim()
+        if (trimmed.startsWith("{")) {
+            return try {
+                val root = mapper.readTree(trimmed)
+                val hubUrl = root.path("hubUrl").asText("").trim()
+                if (hubUrl.isEmpty()) return emptyList()
+                val isMovie = root.path("isMovie").asBoolean(false)
+                val epNum = if (root.hasNonNull("ep")) root.path("ep").asInt() else null
 
-        if (directRes != null && directRes.code in 200..299) {
-            val html = directRes.text
-            if (!html.contains("_cf_chl_opt") &&
-                !html.contains("<title>Just a moment...</title>", ignoreCase = true) &&
-                (html.contains("adc-wrap") || html.contains("adc-ep") || html.contains("adc-btn"))
-            ) {
-                return directRes.document
+                val hubDoc = fetchLinkHubDocument(hubUrl, "$mainUrl/") ?: return emptyList()
+                val origin = extractOrigin(hubUrl) ?: linkHubBase
+
+                if (isMovie) {
+                    parseMovieLinks(hubDoc, origin)
+                } else {
+                    val eps = parseSeriesEpisodes(hubDoc, origin)
+                    if (epNum != null) {
+                        eps.firstOrNull { it.episodeNumber == epNum }?.links
+                            ?: eps.getOrNull((epNum - 1).coerceAtLeast(0))?.links
+                            ?: eps.firstOrNull()?.links.orEmpty()
+                    } else {
+                        eps.firstOrNull()?.links.orEmpty()
+                    }
+                }
+            } catch (_: Exception) {
+                emptyList()
             }
         }
+        return decodeLinkPayload(trimmed)
+    }
 
-        var capturedHtml: String? = null
+    private suspend fun fetchLinkHubDocument(linkHubUrl: String, refererUrl: String): Document? {
+        // 1. Try existing cached cookie or WebView CookieManager cookie first
+        val existingCookie = cachedHubCookie ?: getWebViewCookie(linkHubUrl)?.takeIf {
+            it.contains("cf_clearance")
+        }?.also { cachedHubCookie = it }
+
+        if (!existingCookie.isNullOrBlank()) {
+            val doc = tryFetchWithCookie(linkHubUrl, refererUrl, existingCookie)
+            if (doc != null) return doc
+        } else {
+            val directDoc = tryFetchWithCookie(linkHubUrl, refererUrl, null)
+            if (directDoc != null) return directDoc
+        }
+
+        // 2. Solve Cloudflare Managed Challenge via WebViewResolver (same pattern as CloudStream CloudflareKiller)
+        val oldCookie = getWebViewCookie(linkHubUrl)
+        cachedHubCookie = null
+
         val resolver = WebViewResolver(
-            interceptUrl = Regex("^https://never-match-animedrive\\.invalid$"),
-            additionalUrls = listOf(Regex(".*")),
+            interceptUrl = Regex(".^"),
+            additionalUrls = listOf(Regex(".")),
             userAgent = null,
             useOkhttp = false,
-            script = "(function(){var el=document.querySelector('.adc-wrap,.entry-content');return el?el.outerHTML:'';})()",
-            scriptCallback = { rawJson ->
-                val decoded = try {
-                    mapper.readTree(rawJson).asText("")
-                } catch (_: Exception) {
-                    ""
-                }
-                if (decoded.contains("adc-ep") ||
-                    decoded.contains("adc-btn") ||
-                    decoded.contains("adc-wrap")
-                ) {
-                    capturedHtml = decoded
-                }
-            },
-            timeout = 20_000L
+            timeout = 25_000L
         )
 
         try {
-            resolver.resolveUsingWebView(
-                url = linkHubUrl,
-                referer = refererUrl
-            ) {
-                capturedHtml != null
+            resolver.resolveUsingWebView(url = linkHubUrl) {
+                val freshCookie = getWebViewCookie(linkHubUrl)
+                !freshCookie.isNullOrBlank() &&
+                    freshCookie.contains("cf_clearance") &&
+                    (oldCookie == null || !oldCookie.contains("cf_clearance") || freshCookie != oldCookie)
             }
         } catch (_: Exception) {
             return null
         }
 
-        val html = capturedHtml ?: return null
-        return Jsoup.parseBodyFragment(html, linkHubUrl)
+        val solvedCookie = getWebViewCookie(linkHubUrl)
+            ?.takeIf { it.contains("cf_clearance") }
+            ?.also { cachedHubCookie = it }
+            ?: return null
+
+        return tryFetchWithCookie(linkHubUrl, refererUrl, solvedCookie)
+    }
+
+    private suspend fun tryFetchWithCookie(
+        url: String,
+        refererUrl: String,
+        cookie: String?
+    ): Document? {
+        val ua = if (!cookie.isNullOrBlank()) {
+            WebViewResolver.webViewUserAgent ?: USER_AGENT
+        } else {
+            USER_AGENT
+        }
+        val headers = buildMap {
+            put("User-Agent", ua)
+            put("Referer", refererUrl)
+            if (!cookie.isNullOrBlank()) {
+                put("Cookie", cookie)
+            }
+        }
+
+        val res = try {
+            app.get(url, headers = headers)
+        } catch (_: Exception) {
+            return null
+        }
+
+        if (res.code !in 200..299) return null
+        val html = res.text
+        if (html.contains("_cf_chl_opt") ||
+            html.contains("<title>Just a moment...</title>", ignoreCase = true)
+        ) {
+            return null
+        }
+        return res.document
+    }
+
+    private fun getWebViewCookie(url: String): String? {
+        return try {
+            val cmClass = Class.forName("android.webkit.CookieManager")
+            val instance = cmClass.getMethod("getInstance").invoke(null) ?: return null
+            cmClass.getMethod("getCookie", String::class.java).invoke(instance, url) as? String
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun parseSeriesEpisodes(doc: Document, origin: String): List<ParsedEpisode> {
@@ -432,7 +505,6 @@ class AnimeDriveProvider : MainAPI() {
 
         if (episodes.isNotEmpty()) return episodes
 
-        // Fallback if a single-episode or movie-style card uses adc-hoster without adc-ep
         val fallbackLinks = parseMovieLinks(doc, origin)
         if (fallbackLinks.isEmpty()) return emptyList()
         return listOf(ParsedEpisode(episodeNumber = 1, title = "Episode 1", links = fallbackLinks))
@@ -741,7 +813,6 @@ class AnimeDriveProvider : MainAPI() {
         val parsedQuality = parseQualityFromText(qualityLabel)
         var emitted = false
 
-        // 1. Instant DL (busycdn.instadl.rest -> fastdl-one.pages.dev/?url=video-downloads.googleusercontent.com/...)
         val busyUrl = doc.select("a[href]")
             .mapNotNull { resolveRelativeUrl(it.attr("href"), pageOrigin) }
             .firstOrNull {
@@ -947,6 +1018,14 @@ class AnimeDriveProvider : MainAPI() {
         return rawUrl
     }
 
+    private fun encodeHubFallbackPayload(hubUrl: String, isMovie: Boolean, episodeNum: Int?): String {
+        val obj = mapper.createObjectNode()
+        obj.put("hubUrl", hubUrl)
+        obj.put("isMovie", isMovie)
+        if (episodeNum != null) obj.put("ep", episodeNum)
+        return mapper.writeValueAsString(obj)
+    }
+
     private fun encodeLinkPayload(links: List<ParsedLink>): String {
         val array = mapper.createArrayNode()
         links.forEach { link ->
@@ -982,6 +1061,14 @@ class AnimeDriveProvider : MainAPI() {
             return listOf(ParsedLink(quality = "", host = "", label = "", url = trimmed))
         }
         return emptyList()
+    }
+
+    private fun extractEpisodeCountHint(text: String): Int {
+        val epAdded = Regex("EP-?0*(\\d+)", RegexOption.IGNORE_CASE).find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()
+        val count = Regex("(\\d+)\\s+Episodes?", RegexOption.IGNORE_CASE).find(text)
+            ?.groupValues?.get(1)?.toIntOrNull()
+        return maxOf(epAdded ?: 1, count ?: 1).coerceIn(1, 100)
     }
 
     private fun cleanPostTitle(rawTitle: String): String {
