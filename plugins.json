@@ -97,6 +97,32 @@
         "jarHash": "sha256-a239cf5f569b459304e22eb83609a7425382e3251c32151d973581a0f50db607"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=bilibili.tv&sz=%size%",
+        "jarFileSize": 125557,
+        "fileHash": "sha256-b1ea8b3eb1f137bd8eebc24d15a6c4634df09ed4e567c985deb4f3534a3e7f9b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 34345,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "Movie",
+            "Others"
+        ],
+        "version": 1,
+        "internalName": "BilibiliProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/BilibiliProvider.jar",
+        "description": "Watch licensed anime series, simulcasts, and creator videos on BiliBili (bilibili.tv)",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/BilibiliProvider.cs3",
+        "name": "BilibiliProvider",
+        "jarHash": "sha256-9b7538fce414dde6d33186405eaa297104fc8aadc186e7d00176212d36e843d1"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.blakiteanime.buzz&sz=%size%",
         "jarFileSize": 132181,
         "fileHash": "sha256-e4654b07475ebd5af509e84a228e384a17d386908a3254613ce48fe02ebbf467",
