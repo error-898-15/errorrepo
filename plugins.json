@@ -73,6 +73,31 @@
         "jarHash": "sha256-a239cf5f569b459304e22eb83609a7425382e3251c32151d973581a0f50db607"
     },
     {
+        "iconUrl": "https://www.google.com/s2/favicons?domain=animevilla.org&sz=%size%",
+        "jarFileSize": 272397,
+        "fileHash": "sha256-bd8d1dd41fdaded4412a7ac986a1839aa1122e38d2b3f9d721ef2ae093d93b2b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
+        "fileSize": 74271,
+        "status": 1,
+        "language": "hi",
+        "authors": [
+            "error-898-15"
+        ],
+        "tvTypes": [
+            "Anime",
+            "AnimeMovie",
+            "OVA"
+        ],
+        "version": 1,
+        "internalName": "AnimeVillaProvider",
+        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeVillaProvider.jar",
+        "description": "Watch and stream Hindi dubbed anime series and movies on AnimeVilla (animevilla.org)",
+        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeVillaProvider.cs3",
+        "name": "AnimeVillaProvider",
+        "jarHash": "sha256-1815b04444376725759ac1569202bfd0cdab5dfd08e3e12db1abe0d1b401aae5"
+    },
+    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.blakiteanime.buzz&sz=%size%",
         "jarFileSize": 132181,
         "fileHash": "sha256-e4654b07475ebd5af509e84a228e384a17d386908a3254613ce48fe02ebbf467",
