@@ -73,31 +73,6 @@
         "jarHash": "sha256-a239cf5f569b459304e22eb83609a7425382e3251c32151d973581a0f50db607"
     },
     {
-        "iconUrl": "https://www.google.com/s2/favicons?domain=animevilla.org&sz=%size%",
-        "jarFileSize": 272397,
-        "fileHash": "sha256-bd8d1dd41fdaded4412a7ac986a1839aa1122e38d2b3f9d721ef2ae093d93b2b",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
-        "fileSize": 74271,
-        "status": 1,
-        "language": "hi",
-        "authors": [
-            "error-898-15"
-        ],
-        "tvTypes": [
-            "Anime",
-            "AnimeMovie",
-            "OVA"
-        ],
-        "version": 1,
-        "internalName": "AnimeVillaProvider",
-        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeVillaProvider.jar",
-        "description": "Watch and stream Hindi dubbed anime series and movies on AnimeVilla (animevilla.org)",
-        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnimeVillaProvider.cs3",
-        "name": "AnimeVillaProvider",
-        "jarHash": "sha256-1815b04444376725759ac1569202bfd0cdab5dfd08e3e12db1abe0d1b401aae5"
-    },
-    {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.blakiteanime.buzz&sz=%size%",
         "jarFileSize": 132181,
         "fileHash": "sha256-e4654b07475ebd5af509e84a228e384a17d386908a3254613ce48fe02ebbf467",
@@ -121,31 +96,6 @@
         "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/BlakiteAnimeProvider.cs3",
         "name": "BlakiteAnimeProvider",
         "jarHash": "sha256-07069e1a6d11f4d4f15ed450c9826ff9582e9aa73fc13de9f0414c9e8ba710bf"
-    },
-    {
-        "iconUrl": "https://www.google.com/s2/favicons?domain=hindidubanime.com&sz=%size%",
-        "jarFileSize": 199870,
-        "fileHash": "sha256-a18d2509556f9aa243de065fc5ab32814ec2874f728c9fdfe70c7a51d03e11c6",
-        "apiVersion": 1,
-        "repositoryUrl": "https://github.com/error-898-15/errorrepo",
-        "fileSize": 55857,
-        "status": 1,
-        "language": "hi",
-        "authors": [
-            "error-898-15"
-        ],
-        "tvTypes": [
-            "Anime",
-            "AnimeMovie",
-            "OVA"
-        ],
-        "version": 3,
-        "internalName": "HindiAnimeDubProvider",
-        "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/HindiAnimeDubProvider.jar",
-        "description": "Watch Hindi dubbed and subbed anime series and movies on Hindi Dub Anime",
-        "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/HindiAnimeDubProvider.cs3",
-        "name": "HindiAnimeDubProvider",
-        "jarHash": "sha256-d6d12d4488b78dbf4f2f6752e8df3382b2fa5fa906c12e106dbcb0e98f22537c"
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=just4anime.online&sz=%size%",
