@@ -252,10 +252,7 @@ class BilibiliProvider : MainAPI() {
                     val thumb = cleanImageUrl(ep.path("cover").asText(""))
 
                     episodes.add(
-                        newEpisode(
-                            url = "$mainUrl/en/play/$seasonId/$epId",
-                            fix = false
-                        ) {
+                        newEpisode("$mainUrl/en/play/$seasonId/$epId") {
                             this.name = epName
                             this.episode = epNum
                             this.posterUrl = thumb
@@ -270,10 +267,7 @@ class BilibiliProvider : MainAPI() {
             val firstEpId = season.path("first_episode").path("episode_id").asText("").trim()
             if (firstEpId.isNotEmpty()) {
                 episodes.add(
-                    newEpisode(
-                        url = "$mainUrl/en/play/$seasonId/$firstEpId",
-                        fix = false
-                    ) {
+                    newEpisode("$mainUrl/en/play/$seasonId/$firstEpId") {
                         this.name = season.path("first_episode").path("title_display").asText("Episode 1")
                         this.episode = 1
                     }
@@ -348,11 +342,15 @@ class BilibiliProvider : MainAPI() {
         val primaryPlayUrl = "$apiBase/web/playurl?s_locale=en_US&platform=web&$queryParam&qn=80&device=wap&tf=0&type=0"
         val fallbackPlayUrl = "$apiBase/web/playurl?s_locale=en_US&platform=web&$queryParam"
 
-        var playRoot = getApiJson(primaryPlayUrl)
-        if (playRoot == null || playRoot.path("code").asInt(-1) != 0 ||
-            playRoot.path("data").path("playurl").path("video").none { hasPlayableVideoUrl(it) }
+        val firstRoot = getApiJson(primaryPlayUrl)
+        val playRoot = if (
+            firstRoot == null ||
+            firstRoot.path("code").asInt(-1) != 0 ||
+            firstRoot.path("data").path("playurl").path("video").none { hasPlayableVideoUrl(it) }
         ) {
-            playRoot = getApiJson(fallbackPlayUrl) ?: return false
+            getApiJson(fallbackPlayUrl) ?: return false
+        } else {
+            firstRoot
         }
 
         if (playRoot.path("code").asInt(-1) != 0) {
