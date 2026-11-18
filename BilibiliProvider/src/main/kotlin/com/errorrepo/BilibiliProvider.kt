@@ -252,7 +252,10 @@ class BilibiliProvider : MainAPI() {
                     val thumb = cleanImageUrl(ep.path("cover").asText(""))
 
                     episodes.add(
-                        newEpisode("ogv|$seasonId|$epId") {
+                        newEpisode(
+                            url = "$mainUrl/en/play/$seasonId/$epId",
+                            fix = false
+                        ) {
                             this.name = epName
                             this.episode = epNum
                             this.posterUrl = thumb
@@ -267,7 +270,10 @@ class BilibiliProvider : MainAPI() {
             val firstEpId = season.path("first_episode").path("episode_id").asText("").trim()
             if (firstEpId.isNotEmpty()) {
                 episodes.add(
-                    newEpisode("ogv|$seasonId|$firstEpId") {
+                    newEpisode(
+                        url = "$mainUrl/en/play/$seasonId/$firstEpId",
+                        fix = false
+                    ) {
                         this.name = season.path("first_episode").path("title_display").asText("Episode 1")
                         this.episode = 1
                     }
@@ -322,7 +328,7 @@ class BilibiliProvider : MainAPI() {
         val durationMin = if (durationSec > 0) (durationSec / 60).coerceAtLeast(1) else null
 
         val canonicalUrl = "$mainUrl/en/video/$aid"
-        return newMovieLoadResponse(title, canonicalUrl, TvType.Others, "ugc|$aid") {
+        return newMovieLoadResponse(title, canonicalUrl, TvType.Others, canonicalUrl) {
             this.posterUrl = poster
             this.plot = plotText
             this.year = year
@@ -339,8 +345,15 @@ class BilibiliProvider : MainAPI() {
         val (epId, aid) = parsePlayTarget(data) ?: return false
 
         val queryParam = if (epId != null) "ep_id=$epId" else "aid=$aid"
-        val playUrlEndpoint = "$apiBase/web/playurl?s_locale=en_US&platform=web&$queryParam&qn=80&device=wap&tf=0&type=0"
-        val playRoot = getApiJson(playUrlEndpoint) ?: return false
+        val primaryPlayUrl = "$apiBase/web/playurl?s_locale=en_US&platform=web&$queryParam&qn=80&device=wap&tf=0&type=0"
+        val fallbackPlayUrl = "$apiBase/web/playurl?s_locale=en_US&platform=web&$queryParam"
+
+        var playRoot = getApiJson(primaryPlayUrl)
+        if (playRoot == null || playRoot.path("code").asInt(-1) != 0 ||
+            playRoot.path("data").path("playurl").path("video").none { hasPlayableVideoUrl(it) }
+        ) {
+            playRoot = getApiJson(fallbackPlayUrl) ?: return false
+        }
 
         if (playRoot.path("code").asInt(-1) != 0) {
             return false
@@ -355,19 +368,18 @@ class BilibiliProvider : MainAPI() {
 
         audioList.forEach { aud ->
             val aUrl = aud.path("url").asText("").trim()
-            if (aUrl.isNotEmpty()) {
+            val aBackup = aud.path("backup_url").firstOrNull()?.asText("")?.trim()?.takeIf { it.isNotEmpty() }
+            if (aUrl.isNotEmpty() || aBackup != null) {
                 val score = aud.path("quality").asInt(0).coerceAtLeast(aud.path("bandwidth").asInt(0))
                 if (score >= bestAudioScore) {
                     bestAudioScore = score
-                    bestAudioPrimary = aUrl
-                    bestAudioBackup = aud.path("backup_url").firstOrNull()?.asText("")?.trim()?.takeIf { it.isNotEmpty() }
+                    bestAudioPrimary = aUrl.takeIf { it.isNotEmpty() }
+                    bestAudioBackup = aBackup
                 }
             }
         }
 
-        val videoNodes = playurl.path("video").filter { node ->
-            node.path("video_resource").path("url").asText("").trim().isNotEmpty()
-        }.sortedWith(
+        val videoNodes = playurl.path("video").filter { hasPlayableVideoUrl(it) }.sortedWith(
             compareByDescending<JsonNode> {
                 val codecId = it.path("video_resource").path("codec_id").asInt(0)
                 if (codecId == 7) 1 else 0
@@ -381,9 +393,9 @@ class BilibiliProvider : MainAPI() {
             val vr = vNode.path("video_resource")
             val sr = vNode.path("stream_info")
             val primaryVideoUrl = vr.path("url").asText("").trim()
-            if (primaryVideoUrl.isEmpty()) continue
-
             val backupVideoUrl = vr.path("backup_url").firstOrNull()?.asText("")?.trim()?.takeIf { it.isNotEmpty() }
+            if (primaryVideoUrl.isEmpty() && backupVideoUrl == null) continue
+
             val qn = sr.path("quality").asInt(0)
             val descWords = sr.path("desc_words").asText("").trim()
             val codecs = vr.path("codecs").asText("")
@@ -421,26 +433,29 @@ class BilibiliProvider : MainAPI() {
                 emitted = true
             }
 
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = "$name ($labelSuffix)".trim(),
-                    url = primaryVideoUrl,
-                    type = ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = linkQuality
-                    this.headers = mediaHeaders
-                    if (!bestAudioPrimary.isNullOrBlank()) {
-                        this.audioTracks = listOf(
-                            newAudioFile(bestAudioPrimary!!) {
-                                this.headers = mediaHeaders
-                            }
-                        )
+            if (primaryVideoUrl.isNotEmpty()) {
+                val audioForPrimary = bestAudioPrimary ?: bestAudioBackup
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "$name ($labelSuffix)".trim(),
+                        url = primaryVideoUrl,
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = linkQuality
+                        this.headers = mediaHeaders
+                        if (!audioForPrimary.isNullOrBlank()) {
+                            this.audioTracks = listOf(
+                                newAudioFile(audioForPrimary) {
+                                    this.headers = mediaHeaders
+                                }
+                            )
+                        }
                     }
-                }
-            )
-            emitted = true
+                )
+                emitted = true
+            }
         }
 
         // Load subtitles cleanly (converted from BiliBili JSON to SRT inside getVideoInterceptor)
@@ -509,6 +524,13 @@ class BilibiliProvider : MainAPI() {
         }
     }
 
+    private fun hasPlayableVideoUrl(node: JsonNode): Boolean {
+        val vr = node.path("video_resource")
+        val primary = vr.path("url").asText("").trim()
+        val backup = vr.path("backup_url").firstOrNull()?.asText("")?.trim().orEmpty()
+        return primary.isNotEmpty() || backup.isNotEmpty()
+    }
+
     private fun convertBiliSubJsonToSrt(rawJson: String): String {
         return try {
             val root = mapper.readTree(rawJson)
@@ -549,19 +571,16 @@ class BilibiliProvider : MainAPI() {
 
     private fun parsePlayTarget(data: String): Pair<String?, String?>? {
         val trimmed = data.trim()
-        if (trimmed.startsWith("ogv|")) {
-            val parts = trimmed.split("|")
-            val epId = parts.getOrNull(2)?.takeIf { it.isNotBlank() }
-            if (epId != null) return epId to null
-        }
-        if (trimmed.startsWith("ugc|")) {
-            val aid = trimmed.removePrefix("ugc|").trim().takeIf { it.isNotBlank() }
-            if (aid != null) return null to aid
-        }
         Regex("""/play/\d+/(\d+)""").find(trimmed)?.groupValues?.get(1)?.let { epId ->
             return epId to null
         }
         Regex("""/video/(\d+)""").find(trimmed)?.groupValues?.get(1)?.let { aid ->
+            return null to aid
+        }
+        Regex("""ogv\|\d+\|(\d+)""").find(trimmed)?.groupValues?.get(1)?.let { epId ->
+            return epId to null
+        }
+        Regex("""ugc\|(\d+)""").find(trimmed)?.groupValues?.get(1)?.let { aid ->
             return null to aid
         }
         return null
