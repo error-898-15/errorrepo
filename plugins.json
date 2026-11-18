@@ -99,7 +99,7 @@
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=bilibili.tv&sz=%size%",
         "jarFileSize": 125557,
-        "fileHash": "sha256-b1ea8b3eb1f137bd8eebc24d15a6c4634df09ed4e567c985deb4f3534a3e7f9b",
+        "fileHash": "sha256-06a6db3066021377cd47846b8447c76f9af5e6c1d35ea5af4d5cb03490701c6b",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/error-898-15/errorrepo",
         "fileSize": 34345,
@@ -114,7 +114,7 @@
             "Movie",
             "Others"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "BilibiliProvider",
         "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/BilibiliProvider.jar",
         "description": "Watch licensed anime series, simulcasts, and creator videos on BiliBili (bilibili.tv)",
