@@ -11,7 +11,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.delay
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLDecoder
@@ -423,7 +422,6 @@ class AnirexProvider : MainAPI() {
 
         if (!emittedAny && pending202.isNotEmpty()) {
             for (round in 1..2) {
-                delay(1500)
                 for (pending in pending202) {
                     if (probeFlixUrlOnce(pending.finalUrl)) {
                         emitFlixLink(
