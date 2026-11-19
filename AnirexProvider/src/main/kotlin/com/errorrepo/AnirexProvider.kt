@@ -15,6 +15,10 @@ import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
+import kotlin.coroutines.suspendCoroutine
 
 class AnirexProvider : MainAPI() {
     override var mainUrl = "https://anirex.to"
@@ -32,6 +36,10 @@ class AnirexProvider : MainAPI() {
     private val flixHost = "https://flixcloud.cc"
     private val mapper = jacksonObjectMapper()
     private val pageSize = 28
+
+    private val retryScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "anirex-retry").apply { isDaemon = true }
+    }
 
     private val defaultHeaders = mapOf(
         "User-Agent" to USER_AGENT,
@@ -78,16 +86,27 @@ class AnirexProvider : MainAPI() {
         val audioLabel: String
     )
 
+    private data class PreparedFlixLink(
+        val target: FlixTarget,
+        val sourceUrl: String,
+        val resolvedUrl: String,
+        val resolution: String,
+        val sizeHuman: String,
+        val audioType: String
+    )
+
     private sealed class ProbeOutcome {
         object EMITTED : ProbeOutcome()
         object FAILED : ProbeOutcome()
-        data class Building202(
-            val target: FlixTarget,
-            val finalUrl: String,
-            val resolution: String,
-            val sizeHuman: String,
-            val audioType: String
-        ) : ProbeOutcome()
+        data class Building202(val link: PreparedFlixLink) : ProbeOutcome()
+        data class Fallback(val link: PreparedFlixLink) : ProbeOutcome()
+    }
+
+    private sealed class DownloadProbeResult {
+        data class Ready(val resolvedUrl: String) : DownloadProbeResult()
+        object Building202 : DownloadProbeResult()
+        data class Fallback(val resolvedUrl: String) : DownloadProbeResult()
+        object Failed : DownloadProbeResult()
     }
 
     override suspend fun getMainPage(
@@ -192,7 +211,6 @@ class AnirexProvider : MainAPI() {
 
         val title = pickTitle(animeNode) ?: return null
         val anilistId = animeNode.path("anilist_id").asInt(0)
-
         val poster = animeNode.path("cover_image_url").asText("").trim().takeIf { it.isNotBlank() }
         val backdrop = animeNode.path("banner_image_url").asText("").trim().takeIf { it.isNotBlank() }
         val plotText = cleanHtmlDescription(animeNode.path("description").asText(""))
@@ -239,6 +257,7 @@ class AnirexProvider : MainAPI() {
                 }
             }
         }
+
         animeNode.path("studios").forEach { s ->
             val studioName = if (s.isTextual) s.asText("").trim() else s.path("name").asText("").trim()
             if (studioName.isNotEmpty()) genresList.add(studioName)
@@ -267,8 +286,8 @@ class AnirexProvider : MainAPI() {
             val isDual = audio == "dual"
             val hasSub = epNode.path("has_sub").asBoolean(false) || audio == "sub" || isDual
             val hasDub = epNode.path("has_dub").asBoolean(false) || audio == "dub" || isDual
-
             val epData = buildPlaybackDataUrl(slug, epNum, anilistId)
+
             val episodeObj = newEpisode(epData) {
                 this.name = epTitle
                 this.season = 1
@@ -334,6 +353,7 @@ class AnirexProvider : MainAPI() {
             tags = finalTags
             showStatus = resolvedStatus
             this.recommendations = recommendations
+
             if (subEpisodes.isNotEmpty()) {
                 addEpisodes(DubStatus.Subbed, subEpisodes.sortedBy { it.episode ?: 0 })
             }
@@ -360,43 +380,63 @@ class AnirexProvider : MainAPI() {
             }
         }
 
-        if (ref.anilistId <= 0) return false
-
-        val watchJson = getJson(
-            "$mainUrl/api/v1/watch/${ref.anilistId}/${ref.episode}",
-            defaultHeaders
-        ) ?: return false
-
-        val serversNode = when {
-            watchJson.path("servers").isArray -> watchJson.path("servers")
-            watchJson.path("data").path("servers").isArray -> watchJson.path("data").path("servers")
-            else -> return false
-        }
-
-        val episodeAudio = watchJson.path("audio").asText("").trim()
         val embedRegex = Regex("""/e/([A-Za-z0-9_-]+)""")
-
         val flixTargets = mutableListOf<FlixTarget>()
         val otherEmbeds = mutableListOf<String>()
 
-        for (srv in serversNode) {
-            val playerUrl = srv.path("player_url").asText("").trim()
-                .ifBlank { srv.path("url").asText("").trim() }
-            if (!playerUrl.startsWith("http", ignoreCase = true)) continue
+        if (ref.anilistId > 0) {
+            val watchJson = getJson(
+                "$mainUrl/api/v1/watch/${ref.anilistId}/${ref.episode}",
+                defaultHeaders
+            )
+            if (watchJson != null) {
+                val episodeAudio = watchJson.path("audio").asText("").trim()
+                val serversNode = when {
+                    watchJson.path("servers").isArray -> watchJson.path("servers")
+                    watchJson.path("data").path("servers").isArray -> watchJson.path("data").path("servers")
+                    else -> null
+                }
 
-            val aid = embedRegex.find(playerUrl)?.groupValues?.get(1)
-            if (playerUrl.contains("flixcloud.", ignoreCase = true) && !aid.isNullOrBlank()) {
-                val instance = extractQueryParam(playerUrl, "v")?.trim().orEmpty().ifBlank { "2" }
-                val srvAudio = srv.path("audio").asText(episodeAudio).trim()
-                flixTargets.add(FlixTarget(aid = aid, instance = instance, audioLabel = srvAudio))
-            } else {
-                otherEmbeds.add(playerUrl)
+                if (serversNode != null) {
+                    for (srv in serversNode) {
+                        val playerUrl = srv.path("player_url").asText("").trim()
+                            .ifBlank { srv.path("url").asText("").trim() }
+                        if (!playerUrl.startsWith("http", ignoreCase = true)) continue
+
+                        val aid = embedRegex.find(playerUrl)?.groupValues?.get(1)
+                        if (playerUrl.contains("flixcloud.", ignoreCase = true) && !aid.isNullOrBlank()) {
+                            val instance = extractQueryParam(playerUrl, "v")?.trim().orEmpty().ifBlank { "2" }
+                            val srvAudio = srv.path("audio").asText(episodeAudio).trim()
+                            flixTargets.add(FlixTarget(aid = aid, instance = instance, audioLabel = srvAudio))
+                        } else {
+                            otherEmbeds.add(playerUrl)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (flixTargets.isEmpty() && otherEmbeds.isEmpty()) {
+            val epFallback = fetchAllEpisodes(ref.slug).firstOrNull {
+                it.path("episode_number").asInt(-1) == ref.episode
+            }
+            val playerUrl = epFallback?.path("player")?.asText("")?.trim().orEmpty()
+            if (playerUrl.startsWith("http", ignoreCase = true)) {
+                val aid = embedRegex.find(playerUrl)?.groupValues?.get(1)
+                if (playerUrl.contains("flixcloud.", ignoreCase = true) && !aid.isNullOrBlank()) {
+                    val instance = extractQueryParam(playerUrl, "v")?.trim().orEmpty().ifBlank { "2" }
+                    val epAudio = epFallback?.path("audio")?.asText("")?.trim().orEmpty()
+                    flixTargets.add(FlixTarget(aid = aid, instance = instance, audioLabel = epAudio))
+                } else {
+                    otherEmbeds.add(playerUrl)
+                }
             }
         }
 
         var emittedAny = false
         val fetchedSubKeys = HashSet<String>()
-        val pending202 = mutableListOf<ProbeOutcome.Building202>()
+        val pending202 = mutableListOf<PreparedFlixLink>()
+        val fallbackLinks = mutableListOf<PreparedFlixLink>()
 
         for (target in flixTargets.distinctBy { "${it.aid}:${it.instance}" }) {
             val embedReferer = "$flixHost/e/${target.aid}?v=${target.instance}"
@@ -415,27 +455,49 @@ class AnirexProvider : MainAPI() {
 
             when (val result = resolveAndProbeFlixStream(target, embedReferer, embedAudioType, callback)) {
                 ProbeOutcome.EMITTED -> emittedAny = true
-                is ProbeOutcome.Building202 -> pending202.add(result)
+                is ProbeOutcome.Building202 -> pending202.add(result.link)
+                is ProbeOutcome.Fallback -> fallbackLinks.add(result.link)
                 ProbeOutcome.FAILED -> Unit
             }
         }
 
         if (!emittedAny && pending202.isNotEmpty()) {
-            for (round in 1..2) {
+            val waitScheduleMs = longArrayOf(2500L, 3500L, 4500L)
+            for (waitMs in waitScheduleMs) {
+                pauseMillis(waitMs)
+                val remaining = mutableListOf<PreparedFlixLink>()
                 for (pending in pending202) {
-                    if (probeFlixUrlOnce(pending.finalUrl)) {
-                        emitFlixLink(
-                            target = pending.target,
-                            finalUrl = pending.finalUrl,
-                            resolution = pending.resolution,
-                            sizeHuman = pending.sizeHuman,
-                            audioType = pending.audioType,
-                            callback = callback
-                        )
-                        emittedAny = true
+                    when (val probe = probeFlixDownload(pending.sourceUrl)) {
+                        is DownloadProbeResult.Ready -> {
+                            emitFlixLink(pending.copy(resolvedUrl = probe.resolvedUrl), callback)
+                            emittedAny = true
+                        }
+                        is DownloadProbeResult.Fallback -> {
+                            fallbackLinks.add(pending.copy(resolvedUrl = probe.resolvedUrl))
+                        }
+                        DownloadProbeResult.Building202 -> {
+                            remaining.add(pending)
+                        }
+                        DownloadProbeResult.Failed -> Unit
                     }
                 }
-                if (emittedAny) break
+                pending202.clear()
+                pending202.addAll(remaining)
+                if (emittedAny || pending202.isEmpty()) break
+            }
+        }
+
+        if (!emittedAny) {
+            for (link in fallbackLinks) {
+                emitFlixLink(link, callback)
+                emittedAny = true
+            }
+        }
+
+        if (!emittedAny && pending202.isNotEmpty()) {
+            for (pending in pending202) {
+                emitFlixLink(pending, callback)
+                emittedAny = true
             }
         }
 
@@ -449,6 +511,17 @@ class AnirexProvider : MainAPI() {
         }
 
         return emittedAny
+    }
+
+    private suspend fun pauseMillis(millis: Long) {
+        if (millis <= 0L) return
+        suspendCoroutine<Unit> { continuation ->
+            retryScheduler.schedule(
+                { continuation.resume(Unit) },
+                millis,
+                TimeUnit.MILLISECONDS
+            )
+        }
     }
 
     private suspend fun fetchAllEpisodes(slug: String): List<JsonNode> {
@@ -603,74 +676,93 @@ class AnirexProvider : MainAPI() {
         }
 
         val finalUrl = downloadUrl ?: return ProbeOutcome.FAILED
+        val prepared = PreparedFlixLink(
+            target = target,
+            sourceUrl = finalUrl,
+            resolvedUrl = finalUrl,
+            resolution = resolution,
+            sizeHuman = sizeHuman,
+            audioType = audioType
+        )
+
+        return when (val probe = probeFlixDownload(finalUrl)) {
+            is DownloadProbeResult.Ready -> {
+                emitFlixLink(prepared.copy(resolvedUrl = probe.resolvedUrl), callback)
+                ProbeOutcome.EMITTED
+            }
+            DownloadProbeResult.Building202 -> ProbeOutcome.Building202(prepared)
+            is DownloadProbeResult.Fallback -> ProbeOutcome.Fallback(prepared.copy(resolvedUrl = probe.resolvedUrl))
+            DownloadProbeResult.Failed -> ProbeOutcome.FAILED
+        }
+    }
+
+    private suspend fun probeFlixDownload(finalUrl: String): DownloadProbeResult {
         val probe = try {
-            app.get(finalUrl, headers = flixProbeHeaders)
+            app.get(
+                finalUrl,
+                headers = flixProbeHeaders,
+                allowRedirects = false
+            )
         } catch (_: Exception) {
-            return ProbeOutcome.FAILED
+            return DownloadProbeResult.Fallback(finalUrl)
+        }
+
+        if (probe.code in 300..399) {
+            val location = (probe.headers["Location"] ?: probe.headers["location"]).orEmpty().trim()
+            if (location.startsWith("http", ignoreCase = true)) {
+                return DownloadProbeResult.Ready(location)
+            }
+        }
+
+        if (probe.code == 202) {
+            return DownloadProbeResult.Building202
+        }
+
+        if (probe.code == 429) {
+            return DownloadProbeResult.Fallback(finalUrl)
         }
 
         val ct = (probe.headers["Content-Type"] ?: probe.headers["content-type"]).orEmpty()
         if (probe.code in 200..299 &&
-            probe.code != 202 &&
             !ct.contains("json", ignoreCase = true) &&
             !ct.contains("text/html", ignoreCase = true)
         ) {
-            emitFlixLink(target, finalUrl, resolution, sizeHuman, audioType, callback)
-            return ProbeOutcome.EMITTED
+            return DownloadProbeResult.Ready(finalUrl)
         }
 
-        return if (probe.code == 202) {
-            ProbeOutcome.Building202(target, finalUrl, resolution, sizeHuman, audioType)
-        } else {
-            ProbeOutcome.FAILED
-        }
-    }
-
-    private suspend fun probeFlixUrlOnce(finalUrl: String): Boolean {
-        val probe = try {
-            app.get(finalUrl, headers = flixProbeHeaders)
-        } catch (_: Exception) {
-            return false
-        }
-        val ct = (probe.headers["Content-Type"] ?: probe.headers["content-type"]).orEmpty()
-        return probe.code in 200..299 &&
-            probe.code != 202 &&
-            !ct.contains("json", ignoreCase = true) &&
-            !ct.contains("text/html", ignoreCase = true)
+        return DownloadProbeResult.Failed
     }
 
     private suspend fun emitFlixLink(
-        target: FlixTarget,
-        finalUrl: String,
-        resolution: String,
-        sizeHuman: String,
-        audioType: String,
+        link: PreparedFlixLink,
         callback: (ExtractorLink) -> Unit
     ) {
         val audioBadge = when {
-            audioType.equals("dual", ignoreCase = true) -> "Sub + Dub"
-            audioType.equals("dub", ignoreCase = true) -> "Dub"
-            audioType.equals("native", ignoreCase = true) ||
-                audioType.equals("sub", ignoreCase = true) -> "Sub"
-            target.audioLabel.equals("dual", ignoreCase = true) -> "Sub + Dub"
+            link.audioType.equals("dual", ignoreCase = true) -> "Sub + Dub"
+            link.audioType.equals("dub", ignoreCase = true) -> "Dub"
+            link.audioType.equals("native", ignoreCase = true) ||
+                link.audioType.equals("sub", ignoreCase = true) -> "Sub"
+            link.target.audioLabel.equals("dual", ignoreCase = true) -> "Sub + Dub"
             else -> ""
         }
         val labelParts = listOfNotNull(
             name,
             "FlixCloud",
             audioBadge.takeIf { it.isNotEmpty() },
-            sizeHuman.takeIf { it.isNotEmpty() }
+            link.sizeHuman.takeIf { it.isNotEmpty() }
         )
 
         callback(
             newExtractorLink(
                 source = name,
                 name = labelParts.joinToString(" · "),
-                url = finalUrl,
+                url = link.resolvedUrl,
                 type = ExtractorLinkType.VIDEO
             ) {
-                this.referer = "$flixHost/"
-                this.quality = getQualityFromName(resolution)
+                if (link.resolvedUrl.contains("flixcloud.", ignoreCase = true)) {
+                    this.referer = "$flixHost/"
+                }
+                this.quality = getQualityFromName(link.resolution)
             }
         )
     }
