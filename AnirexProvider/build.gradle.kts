@@ -1,5 +1,5 @@
 // Use an integer for version numbers
-version = 3
+version = 4
 
 cloudstream {
     description = "Watch subbed and dubbed anime series, movies, and OVAs on Anirex (anirex.to)"
