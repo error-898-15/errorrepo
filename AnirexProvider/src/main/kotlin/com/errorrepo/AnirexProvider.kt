@@ -316,8 +316,9 @@ class AnirexProvider : MainAPI() {
         val tvType = resolveTvType(formatRaw)
 
         val episodeNodes = fetchAllEpisodes(slug)
-        val subEpisodes = mutableListOf<Episode>()
-        val dubEpisodes = mutableListOf<Episode>()
+        val allEpisodes = mutableListOf<Episode>()
+        var hasAnySubOrDual = false
+        var hasAnyDub = false
 
         for ((idx, epNode) in episodeNodes.withIndex()) {
             val epNum = epNode.path("episode_number").asInt(idx + 1).coerceAtLeast(1)
@@ -332,21 +333,18 @@ class AnirexProvider : MainAPI() {
             val isDual = audio == "dual"
             val hasSub = epNode.path("has_sub").asBoolean(false) || audio == "sub" || isDual
             val hasDub = epNode.path("has_dub").asBoolean(false) || audio == "dub" || isDual
+            if (hasSub || !hasDub) hasAnySubOrDual = true
+            if (hasDub) hasAnyDub = true
+
             val epData = buildPlaybackDataUrl(slug, epNum, anilistId)
-
-            val episodeObj = newEpisode(epData) {
-                this.name = epTitle
-                this.season = 1
-                this.episode = epNum
-                this.posterUrl = poster
-            }
-
-            if (hasSub || !hasDub) {
-                subEpisodes.add(episodeObj)
-            }
-            if (hasDub) {
-                dubEpisodes.add(episodeObj)
-            }
+            allEpisodes.add(
+                newEpisode(epData) {
+                    this.name = epTitle
+                    this.season = 1
+                    this.episode = epNum
+                    this.posterUrl = poster
+                }
+            )
         }
 
         if (tvType == TvType.AnimeMovie && episodeNodes.size <= 1) {
@@ -363,23 +361,17 @@ class AnirexProvider : MainAPI() {
             }
         }
 
-        if (subEpisodes.isEmpty() && dubEpisodes.isEmpty() && anilistId > 0) {
+        if (allEpisodes.isEmpty() && anilistId > 0) {
             val subCount = animeNode.path("sub_count").asInt(0)
             val dubCount = animeNode.path("dub_count").asInt(0)
-            for (epNum in 1..subCount) {
+            val latestCount = animeNode.path("latest_episode_number").asInt(0)
+            val fallbackTotal = maxOf(subCount, dubCount, latestCount)
+            if (subCount > 0 || dubCount == 0) hasAnySubOrDual = true
+            if (dubCount > 0) hasAnyDub = true
+
+            for (epNum in 1..fallbackTotal) {
                 val epData = buildPlaybackDataUrl(slug, epNum, anilistId)
-                subEpisodes.add(
-                    newEpisode(epData) {
-                        this.name = "Episode $epNum"
-                        this.season = 1
-                        this.episode = epNum
-                        this.posterUrl = poster
-                    }
-                )
-            }
-            for (epNum in 1..dubCount) {
-                val epData = buildPlaybackDataUrl(slug, epNum, anilistId)
-                dubEpisodes.add(
+                allEpisodes.add(
                     newEpisode(epData) {
                         this.name = "Episode $epNum"
                         this.season = 1
@@ -389,6 +381,11 @@ class AnirexProvider : MainAPI() {
                 )
             }
         }
+
+        val sortedEpisodes = allEpisodes
+            .distinctBy { it.episode ?: 0 }
+            .sortedBy { it.episode ?: 0 }
+        val targetDubStatus = if (hasAnyDub && !hasAnySubOrDual) DubStatus.Dubbed else DubStatus.Subbed
 
         return newAnimeLoadResponse(title, pageUrl, tvType) {
             posterUrl = poster
@@ -400,11 +397,8 @@ class AnirexProvider : MainAPI() {
             showStatus = resolvedStatus
             this.recommendations = recommendations
 
-            if (subEpisodes.isNotEmpty()) {
-                addEpisodes(DubStatus.Subbed, subEpisodes.sortedBy { it.episode ?: 0 })
-            }
-            if (dubEpisodes.isNotEmpty()) {
-                addEpisodes(DubStatus.Dubbed, dubEpisodes.sortedBy { it.episode ?: 0 })
+            if (sortedEpisodes.isNotEmpty()) {
+                addEpisodes(targetDubStatus, sortedEpisodes)
             }
         }
     }
