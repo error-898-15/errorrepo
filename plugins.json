@@ -99,7 +99,7 @@
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=anirex.to&sz=%size%",
         "jarFileSize": 207789,
-        "fileHash": "sha256-c5191e80dc159ab56f6a4bb15ac98912a5d88e15a0a5f9a0c988809757859d2a",
+        "fileHash": "sha256-b469a1ff06fa46c2fe3bb8353933f9d05ee9c22eef12d9fc349d1ef237da70c9",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/error-898-15/errorrepo",
         "fileSize": 59689,
@@ -113,7 +113,7 @@
             "AnimeMovie",
             "OVA"
         ],
-        "version": 4,
+        "version": 5,
         "internalName": "AnirexProvider",
         "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnirexProvider.jar",
         "description": "Watch subbed and dubbed anime series, movies, and OVAs on Anirex (anirex.to)",
