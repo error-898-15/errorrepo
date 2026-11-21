@@ -118,6 +118,13 @@ class AnirexProvider : MainAPI() {
         val familyTag: String = ""
     )
 
+    private enum class ResolverMode {
+        NICE_HTTP,
+        SYSTEM_HTTP_CONN,
+        OK_IPV4,
+        OK_IPV6
+    }
+
     private sealed class ProbeOutcome {
         data class Ready(val link: PreparedFlixLink) : ProbeOutcome()
         data class Building202(val link: PreparedFlixLink) : ProbeOutcome()
@@ -128,6 +135,7 @@ class AnirexProvider : MainAPI() {
     private sealed class DownloadProbeResult {
         data class Ready(val resolvedUrl: String) : DownloadProbeResult()
         object Building202 : DownloadProbeResult()
+        object Retry429 : DownloadProbeResult()
         data class Fallback(val resolvedUrl: String) : DownloadProbeResult()
         object Failed : DownloadProbeResult()
     }
@@ -136,8 +144,8 @@ class AnirexProvider : MainAPI() {
         val builder = OkHttpClient.Builder()
             .followRedirects(false)
             .followSslRedirects(false)
-            .connectTimeout(4, TimeUnit.SECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(12, TimeUnit.SECONDS)
 
         if (forceIpv6 != null) {
             builder.dns(object : Dns {
@@ -476,7 +484,6 @@ class AnirexProvider : MainAPI() {
         var emittedAny = false
         val fetchedSubKeys = HashSet<String>()
         val readyLinks = mutableListOf<PreparedFlixLink>()
-        val pending202 = mutableListOf<Pair<OkHttpClient?, PreparedFlixLink>>()
         val fallbackLinks = mutableListOf<PreparedFlixLink>()
 
         for (target in flixTargets.distinctBy { "${it.aid}:${it.instance}" }) {
@@ -494,81 +501,72 @@ class AnirexProvider : MainAPI() {
                 }
             }
 
-            var targetFoundAny = false
-            for ((client, familyTag) in listOf(ipv4Client to "IPv4", ipv6Client to "IPv6")) {
-                when (val outcome = resolveWithOkClient(client, target, embedReferer, embedAudioType, familyTag)) {
-                    is ProbeOutcome.Ready -> {
-                        readyLinks.add(outcome.link)
-                        targetFoundAny = true
-                    }
-                    is ProbeOutcome.Building202 -> {
-                        pending202.add(client to outcome.link)
-                        targetFoundAny = true
-                    }
-                    is ProbeOutcome.Fallback -> {
-                        fallbackLinks.add(outcome.link)
-                        targetFoundAny = true
-                    }
-                    ProbeOutcome.FAILED -> Unit
+            val niceOutcome = resolveTargetWithRetries(
+                mode = ResolverMode.NICE_HTTP,
+                target = target,
+                embedReferer = embedReferer,
+                audioType = embedAudioType,
+                familyTag = ""
+            )
+
+            var niceReadyLink: PreparedFlixLink? = null
+            when (niceOutcome) {
+                is ProbeOutcome.Ready -> niceReadyLink = niceOutcome.link
+                is ProbeOutcome.Fallback -> fallbackLinks.add(niceOutcome.link)
+                is ProbeOutcome.Building202 -> fallbackLinks.add(niceOutcome.link)
+                ProbeOutcome.FAILED -> Unit
+            }
+
+            if (niceReadyLink != null) {
+                val systemOk = runIo { probeWithSystemHttpUrlConnection(niceReadyLink.resolvedUrl) }
+                if (systemOk) {
+                    readyLinks.add(niceReadyLink)
+                    continue
                 }
             }
 
-            if (!targetFoundAny) {
-                when (val outcome = resolveWithNiceHttp(target, embedReferer, embedAudioType)) {
-                    is ProbeOutcome.Ready -> readyLinks.add(outcome.link)
-                    is ProbeOutcome.Building202 -> pending202.add(null to outcome.link)
-                    is ProbeOutcome.Fallback -> fallbackLinks.add(outcome.link)
-                    ProbeOutcome.FAILED -> Unit
-                }
+            var sysReadyLink: PreparedFlixLink? = null
+            when (val sysOutcome = resolveTargetWithRetries(
+                mode = ResolverMode.SYSTEM_HTTP_CONN,
+                target = target,
+                embedReferer = embedReferer,
+                audioType = embedAudioType,
+                familyTag = "Direct"
+            )) {
+                is ProbeOutcome.Ready -> sysReadyLink = sysOutcome.link
+                is ProbeOutcome.Fallback -> fallbackLinks.add(sysOutcome.link)
+                is ProbeOutcome.Building202 -> fallbackLinks.add(sysOutcome.link)
+                ProbeOutcome.FAILED -> Unit
             }
-        }
 
-        if (readyLinks.isEmpty() && pending202.isNotEmpty()) {
-            val waitScheduleMs = longArrayOf(2500L, 3500L, 4500L)
-            for (waitMs in waitScheduleMs) {
-                pauseMillis(waitMs)
-                val remaining = mutableListOf<Pair<OkHttpClient?, PreparedFlixLink>>()
-                for ((client, pending) in pending202) {
-                    val probe = if (client != null) {
-                        runIo { probeFlixDownloadWithClient(client, pending.sourceUrl) }
-                    } else {
-                        probeFlixDownloadWithNiceHttp(pending.sourceUrl)
-                    }
-                    when (probe) {
-                        is DownloadProbeResult.Ready -> {
-                            readyLinks.add(pending.copy(resolvedUrl = probe.resolvedUrl))
-                        }
-                        is DownloadProbeResult.Fallback -> {
-                            fallbackLinks.add(pending.copy(resolvedUrl = probe.resolvedUrl))
-                        }
-                        DownloadProbeResult.Building202 -> {
-                            remaining.add(client to pending)
-                        }
-                        DownloadProbeResult.Failed -> Unit
+            if (sysReadyLink != null) {
+                readyLinks.add(sysReadyLink)
+            }
+            if (niceReadyLink != null) {
+                readyLinks.add(
+                    if (sysReadyLink != null) niceReadyLink.copy(familyTag = "Alt") else niceReadyLink
+                )
+            }
+
+            if (sysReadyLink == null && niceReadyLink == null) {
+                for ((mode, tag) in listOf(
+                    ResolverMode.OK_IPV4 to "IPv4",
+                    ResolverMode.OK_IPV6 to "IPv6"
+                )) {
+                    when (val outcome = resolveTargetWithRetries(mode, target, embedReferer, embedAudioType, tag)) {
+                        is ProbeOutcome.Ready -> readyLinks.add(outcome.link)
+                        is ProbeOutcome.Fallback -> fallbackLinks.add(outcome.link)
+                        is ProbeOutcome.Building202 -> fallbackLinks.add(outcome.link)
+                        ProbeOutcome.FAILED -> Unit
                     }
                 }
-                pending202.clear()
-                pending202.addAll(remaining)
-                if (readyLinks.isNotEmpty() || pending202.isEmpty()) break
             }
         }
 
         val distinctReady = readyLinks.distinctBy { it.resolvedUrl }
         if (distinctReady.isNotEmpty()) {
-            val prioritized = if (distinctReady.size > 1) {
-                val systemPreferred = mutableListOf<PreparedFlixLink>()
-                val others = mutableListOf<PreparedFlixLink>()
-                for (item in distinctReady) {
-                    val ok = runIo { probeWithSystemHttpUrlConnection(item.resolvedUrl) }
-                    if (ok) systemPreferred.add(item) else others.add(item)
-                }
-                systemPreferred + others
-            } else {
-                distinctReady
-            }
-
-            val showFamily = prioritized.size > 1
-            for (link in prioritized) {
+            val showFamily = distinctReady.size > 1
+            for (link in distinctReady) {
                 emitFlixLink(link, includeFamilyTag = showFamily, callback = callback)
                 emittedAny = true
             }
@@ -579,15 +577,6 @@ class AnirexProvider : MainAPI() {
             val showFamily = distinctFallbacks.size > 1
             for (link in distinctFallbacks) {
                 emitFlixLink(link, includeFamilyTag = showFamily, callback = callback)
-                emittedAny = true
-            }
-        }
-
-        if (!emittedAny && pending202.isNotEmpty()) {
-            val stillPending = pending202.map { it.second }.distinctBy { it.resolvedUrl }
-            val showFamily = stillPending.size > 1
-            for (pending in stillPending) {
-                emitFlixLink(pending, includeFamilyTag = showFamily, callback = callback)
                 emittedAny = true
             }
         }
@@ -622,23 +611,34 @@ class AnirexProvider : MainAPI() {
 
             initialResponse.close()
 
-            if (code == 202) {
+            if (code == 202 || code == 429) {
                 try {
-                    Thread.sleep(2500L)
+                    Thread.sleep(3000L)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
-                val retry202 = chain.proceed(request)
-                if (retry202.isSuccessful && retry202.code != 202) {
-                    return@Interceptor retry202
+                val retrySame = try {
+                    chain.proceed(request)
+                } catch (_: Exception) {
+                    null
                 }
-                retry202.close()
+                if (retrySame != null) {
+                    if (retrySame.isSuccessful && retrySame.code != 202) {
+                        return@Interceptor retrySame
+                    }
+                    retrySame.close()
+                }
+            }
+
+            val chainResolved = resolveThroughChain(chain, request, target)
+            if (chainResolved != null) {
+                return@Interceptor chainResolved
             }
 
             val triedUrls = HashSet<String>()
             triedUrls.add(reqUrl)
 
-            for (client in listOf(ipv6Client, ipv4Client, defaultOkClient)) {
+            for (client in listOf(defaultOkClient, ipv6Client, ipv4Client)) {
                 val freshUrl = resolveFlixDirectUrlSync(client, target) ?: continue
                 if (!triedUrls.add(freshUrl)) continue
 
@@ -658,6 +658,180 @@ class AnirexProvider : MainAPI() {
             }
 
             chain.proceed(request)
+        }
+    }
+
+    private fun resolveThroughChain(
+        chain: Interceptor.Chain,
+        originalRequest: Request,
+        target: FlixTarget
+    ): okhttp3.Response? {
+        val embedReferer = "$flixHost/e/${target.aid}?v=${target.instance}"
+        val dReq = Request.Builder()
+            .url("$flixHost/d/${target.aid}/__data.json?v=${target.instance}")
+            .header("User-Agent", USER_AGENT)
+            .header("Referer", embedReferer)
+            .build()
+
+        val rawJson = try {
+            chain.proceed(dReq).use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string().orEmpty()
+            }
+        } catch (_: Exception) {
+            return null
+        }
+
+        val downloadUrl = parseFlixDownloadNode(rawJson)?.first ?: return null
+        val origRange = originalRequest.header("Range")
+
+        for (attempt in 1..4) {
+            val dlBuilder = Request.Builder()
+                .url(downloadUrl)
+                .header("User-Agent", originalRequest.header("User-Agent") ?: USER_AGENT)
+                .header("Referer", "$flixHost/")
+            if (!origRange.isNullOrBlank()) {
+                dlBuilder.header("Range", origRange)
+            }
+            val resp = try {
+                chain.proceed(dlBuilder.build())
+            } catch (_: Exception) {
+                return null
+            }
+
+            val code = resp.code
+            if (code in 300..399) {
+                val location = resp.header("Location").orEmpty().trim()
+                resp.close()
+                if (location.startsWith("http", ignoreCase = true)) {
+                    val redirectReq = originalRequest.newBuilder().url(location).build()
+                    val redirectResp = try {
+                        chain.proceed(redirectReq)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (redirectResp != null) {
+                        if (redirectResp.isSuccessful && redirectResp.code != 202) {
+                            recordLinkTarget(location, target)
+                            return redirectResp
+                        }
+                        redirectResp.close()
+                    }
+                }
+                return null
+            }
+
+            if (code == 202 || code == 429) {
+                resp.close()
+                if (attempt < 4) {
+                    try {
+                        Thread.sleep(3000L)
+                    } catch (_: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        return null
+                    }
+                }
+                continue
+            }
+
+            val ct = resp.header("Content-Type").orEmpty()
+            if (resp.isSuccessful &&
+                !ct.contains("json", ignoreCase = true) &&
+                !ct.contains("text/html", ignoreCase = true)
+            ) {
+                recordLinkTarget(resp.request.url.toString(), target)
+                return resp
+            }
+
+            resp.close()
+            return null
+        }
+        return null
+    }
+
+    private suspend fun resolveTargetWithRetries(
+        mode: ResolverMode,
+        target: FlixTarget,
+        embedReferer: String,
+        audioType: String,
+        familyTag: String
+    ): ProbeOutcome {
+        val raw = when (mode) {
+            ResolverMode.NICE_HTTP -> try {
+                app.get(
+                    "$flixHost/d/${target.aid}/__data.json?v=${target.instance}",
+                    headers = mapOf("User-Agent" to USER_AGENT, "Referer" to embedReferer)
+                ).text
+            } catch (_: Exception) {
+                null
+            }
+            ResolverMode.SYSTEM_HTTP_CONN -> runIo {
+                httpUrlConnGetText(
+                    "$flixHost/d/${target.aid}/__data.json?v=${target.instance}",
+                    mapOf("User-Agent" to USER_AGENT, "Referer" to embedReferer)
+                )
+            }
+            ResolverMode.OK_IPV4 -> runIo {
+                okClientGetText(
+                    ipv4Client,
+                    "$flixHost/d/${target.aid}/__data.json?v=${target.instance}",
+                    embedReferer
+                )
+            }
+            ResolverMode.OK_IPV6 -> runIo {
+                okClientGetText(
+                    ipv6Client,
+                    "$flixHost/d/${target.aid}/__data.json?v=${target.instance}",
+                    embedReferer
+                )
+            }
+        } ?: return ProbeOutcome.FAILED
+
+        val parsed = parseFlixDownloadNode(raw) ?: return ProbeOutcome.FAILED
+        val prepared = PreparedFlixLink(
+            target = target,
+            sourceUrl = parsed.first,
+            resolvedUrl = parsed.first,
+            resolution = parsed.second,
+            sizeHuman = parsed.third,
+            audioType = audioType,
+            familyTag = familyTag
+        )
+
+        var currentProbe = probeOnceByMode(mode, prepared.sourceUrl)
+
+        if (currentProbe is DownloadProbeResult.Retry429) {
+            pauseMillis(3000L)
+            currentProbe = probeOnceByMode(mode, prepared.sourceUrl)
+        }
+
+        if (currentProbe is DownloadProbeResult.Building202) {
+            for (waitMs in longArrayOf(3000L, 4000L, 5000L, 6000L)) {
+                pauseMillis(waitMs)
+                currentProbe = probeOnceByMode(mode, prepared.sourceUrl)
+                if (currentProbe is DownloadProbeResult.Retry429) {
+                    pauseMillis(3000L)
+                    currentProbe = probeOnceByMode(mode, prepared.sourceUrl)
+                }
+                if (currentProbe !is DownloadProbeResult.Building202) break
+            }
+        }
+
+        return when (currentProbe) {
+            is DownloadProbeResult.Ready -> ProbeOutcome.Ready(prepared.copy(resolvedUrl = currentProbe.resolvedUrl))
+            DownloadProbeResult.Building202 -> ProbeOutcome.Building202(prepared)
+            DownloadProbeResult.Retry429 -> ProbeOutcome.Fallback(prepared)
+            is DownloadProbeResult.Fallback -> ProbeOutcome.Fallback(prepared.copy(resolvedUrl = currentProbe.resolvedUrl))
+            DownloadProbeResult.Failed -> ProbeOutcome.FAILED
+        }
+    }
+
+    private suspend fun probeOnceByMode(mode: ResolverMode, downloadUrl: String): DownloadProbeResult {
+        return when (mode) {
+            ResolverMode.NICE_HTTP -> probeFlixDownloadWithNiceHttp(downloadUrl)
+            ResolverMode.SYSTEM_HTTP_CONN -> runIo { probeFlixDownloadWithHttpUrlConn(downloadUrl) }
+            ResolverMode.OK_IPV4 -> runIo { probeFlixDownloadWithClient(ipv4Client, downloadUrl) }
+            ResolverMode.OK_IPV6 -> runIo { probeFlixDownloadWithClient(ipv6Client, downloadUrl) }
         }
     }
 
@@ -798,105 +972,58 @@ class AnirexProvider : MainAPI() {
         return audioType
     }
 
-    private suspend fun resolveWithOkClient(
-        client: OkHttpClient,
-        target: FlixTarget,
-        embedReferer: String,
-        audioType: String,
-        familyTag: String
-    ): ProbeOutcome {
-        return runIo {
-            val raw = try {
-                val req = Request.Builder()
-                    .url("$flixHost/d/${target.aid}/__data.json?v=${target.instance}")
-                    .header("User-Agent", USER_AGENT)
-                    .header("Referer", embedReferer)
-                    .build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@runIo ProbeOutcome.FAILED
-                    resp.body?.string().orEmpty()
-                }
-            } catch (_: Exception) {
-                return@runIo ProbeOutcome.FAILED
+    private fun okClientGetText(client: OkHttpClient, targetUrl: String, referer: String): String? {
+        return try {
+            val req = Request.Builder()
+                .url(targetUrl)
+                .header("User-Agent", USER_AGENT)
+                .header("Referer", referer)
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return null
+                resp.body?.string()
             }
-
-            val parsed = parseFlixDownloadNode(raw) ?: return@runIo ProbeOutcome.FAILED
-            val prepared = PreparedFlixLink(
-                target = target,
-                sourceUrl = parsed.first,
-                resolvedUrl = parsed.first,
-                resolution = parsed.second,
-                sizeHuman = parsed.third,
-                audioType = audioType,
-                familyTag = familyTag
-            )
-
-            when (val probe = probeFlixDownloadWithClient(client, parsed.first)) {
-                is DownloadProbeResult.Ready -> ProbeOutcome.Ready(prepared.copy(resolvedUrl = probe.resolvedUrl))
-                DownloadProbeResult.Building202 -> ProbeOutcome.Building202(prepared)
-                is DownloadProbeResult.Fallback -> ProbeOutcome.Fallback(prepared.copy(resolvedUrl = probe.resolvedUrl))
-                DownloadProbeResult.Failed -> ProbeOutcome.FAILED
-            }
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private suspend fun resolveWithNiceHttp(
-        target: FlixTarget,
-        embedReferer: String,
-        audioType: String
-    ): ProbeOutcome {
-        val raw = try {
-            app.get(
-                "$flixHost/d/${target.aid}/__data.json?v=${target.instance}",
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to embedReferer
-                )
-            ).text
+    private fun httpUrlConnGetText(targetUrl: String, headers: Map<String, String>): String? {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = true
+                connectTimeout = 6000
+                readTimeout = 10000
+                headers.forEach { (k, v) -> setRequestProperty(k, v) }
+            }
+            if (conn.responseCode !in 200..299) return null
+            conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         } catch (_: Exception) {
-            return ProbeOutcome.FAILED
-        }
-
-        val parsed = parseFlixDownloadNode(raw) ?: return ProbeOutcome.FAILED
-        val prepared = PreparedFlixLink(
-            target = target,
-            sourceUrl = parsed.first,
-            resolvedUrl = parsed.first,
-            resolution = parsed.second,
-            sizeHuman = parsed.third,
-            audioType = audioType
-        )
-
-        return when (val probe = probeFlixDownloadWithNiceHttp(parsed.first)) {
-            is DownloadProbeResult.Ready -> ProbeOutcome.Ready(prepared.copy(resolvedUrl = probe.resolvedUrl))
-            DownloadProbeResult.Building202 -> ProbeOutcome.Building202(prepared)
-            is DownloadProbeResult.Fallback -> ProbeOutcome.Fallback(prepared.copy(resolvedUrl = probe.resolvedUrl))
-            DownloadProbeResult.Failed -> ProbeOutcome.FAILED
+            null
+        } finally {
+            try {
+                conn?.disconnect()
+            } catch (_: Exception) {
+            }
         }
     }
 
     private fun resolveFlixDirectUrlSync(client: OkHttpClient, target: FlixTarget): String? {
-        val raw = try {
-            val req = Request.Builder()
-                .url("$flixHost/d/${target.aid}/__data.json?v=${target.instance}")
-                .header("User-Agent", USER_AGENT)
-                .header("Referer", "$flixHost/e/${target.aid}?v=${target.instance}")
-                .build()
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return null
-                resp.body?.string().orEmpty()
-            }
-        } catch (_: Exception) {
-            return null
-        }
+        val raw = okClientGetText(
+            client,
+            "$flixHost/d/${target.aid}/__data.json?v=${target.instance}",
+            "$flixHost/e/${target.aid}?v=${target.instance}"
+        ) ?: return null
 
         val downloadUrl = parseFlixDownloadNode(raw)?.first ?: return null
         return when (val probe = probeFlixDownloadWithClient(client, downloadUrl)) {
             is DownloadProbeResult.Ready -> probe.resolvedUrl
             is DownloadProbeResult.Fallback -> probe.resolvedUrl
-            DownloadProbeResult.Building202 -> {
+            DownloadProbeResult.Building202, DownloadProbeResult.Retry429 -> {
                 try {
-                    Thread.sleep(2500L)
+                    Thread.sleep(3000L)
                 } catch (_: InterruptedException) {
                     Thread.currentThread().interrupt()
                 }
@@ -946,7 +1073,7 @@ class AnirexProvider : MainAPI() {
                     }
                 }
                 if (code == 202) return DownloadProbeResult.Building202
-                if (code == 429) return DownloadProbeResult.Fallback(finalUrl)
+                if (code == 429) return DownloadProbeResult.Retry429
 
                 val ct = resp.header("Content-Type").orEmpty()
                 if (code in 200..299 &&
@@ -959,6 +1086,46 @@ class AnirexProvider : MainAPI() {
             }
         } catch (_: Exception) {
             DownloadProbeResult.Fallback(finalUrl)
+        }
+    }
+
+    private fun probeFlixDownloadWithHttpUrlConn(finalUrl: String): DownloadProbeResult {
+        var conn: HttpURLConnection? = null
+        return try {
+            conn = (URL(finalUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = false
+                connectTimeout = 6000
+                readTimeout = 10000
+                setRequestProperty("User-Agent", USER_AGENT)
+                setRequestProperty("Referer", "$flixHost/")
+                setRequestProperty("Range", "bytes=0-1")
+            }
+            val code = conn.responseCode
+            if (code in 300..399) {
+                val location = conn.getHeaderField("Location").orEmpty().trim()
+                if (location.startsWith("http", ignoreCase = true)) {
+                    return DownloadProbeResult.Ready(location)
+                }
+            }
+            if (code == 202) return DownloadProbeResult.Building202
+            if (code == 429) return DownloadProbeResult.Retry429
+
+            val ct = conn.contentType.orEmpty()
+            if (code in 200..299 &&
+                !ct.contains("json", ignoreCase = true) &&
+                !ct.contains("text/html", ignoreCase = true)
+            ) {
+                return DownloadProbeResult.Ready(finalUrl)
+            }
+            DownloadProbeResult.Failed
+        } catch (_: Exception) {
+            DownloadProbeResult.Fallback(finalUrl)
+        } finally {
+            try {
+                conn?.disconnect()
+            } catch (_: Exception) {
+            }
         }
     }
 
@@ -985,7 +1152,7 @@ class AnirexProvider : MainAPI() {
         }
 
         if (probe.code == 429) {
-            return DownloadProbeResult.Fallback(finalUrl)
+            return DownloadProbeResult.Retry429
         }
 
         val ct = (probe.headers["Content-Type"] ?: probe.headers["content-type"]).orEmpty()
@@ -1005,8 +1172,8 @@ class AnirexProvider : MainAPI() {
             conn = (URL(targetUrl).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                connectTimeout = 4500
-                readTimeout = 4500
+                connectTimeout = 5000
+                readTimeout = 5000
                 setRequestProperty("User-Agent", USER_AGENT)
                 setRequestProperty("Range", "bytes=0-1")
                 if (targetUrl.contains("flixcloud.", ignoreCase = true)) {
