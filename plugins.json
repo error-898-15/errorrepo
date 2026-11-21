@@ -98,11 +98,11 @@
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=anirex.to&sz=%size%",
-        "jarFileSize": 207789,
-        "fileHash": "sha256-b469a1ff06fa46c2fe3bb8353933f9d05ee9c22eef12d9fc349d1ef237da70c9",
+        "jarFileSize": 217106,
+        "fileHash": "sha256-eec7c4a22a807da65c7140382658962fe1e292a572000f543743ea5e870d1578",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/error-898-15/errorrepo",
-        "fileSize": 59689,
+        "fileSize": 63022,
         "status": 1,
         "language": "en",
         "authors": [
@@ -119,7 +119,7 @@
         "description": "Watch subbed and dubbed anime series, movies, and OVAs on Anirex (anirex.to)",
         "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/AnirexProvider.cs3",
         "name": "AnirexProvider",
-        "jarHash": "sha256-5a5bda1a7bb6c448aad5dcb893ba9b6b729b44976a62b3b3b20b9320a672195b"
+        "jarHash": "sha256-54a9095a0d698429665fcdbeb8bf2f10bb4ac8b790cf1984610bf4d7b274cfb7"
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=bilibili.tv&sz=%size%",
