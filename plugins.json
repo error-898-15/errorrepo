@@ -199,11 +199,11 @@
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=movienestbd.best&sz=%size%",
-        "jarFileSize": 201043,
-        "fileHash": "sha256-cf5b0cd15e52ea49a735c6429a3a7a10ec13d9688785f47f86f361816b5f7a40",
+        "jarFileSize": 240345,
+        "fileHash": "sha256-951f2959621967a9f4bca7c1945c5c68645600de1b2b3ff9e529f429129c8a69",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/error-898-15/errorrepo",
-        "fileSize": 54600,
+        "fileSize": 64679,
         "status": 1,
         "language": "bn",
         "authors": [
@@ -215,13 +215,13 @@
             "Anime",
             "AnimeMovie"
         ],
-        "version": 1,
+        "version": 2,
         "internalName": "MovieNestBDProvider",
         "jarUrl": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/MovieNestBDProvider.jar",
         "description": "Watch Bengali, Hindi, English, and Korean movies, web series, and anime on MovieNestBD",
         "url": "https://raw.githubusercontent.com/error-898-15/errorrepo/builds/MovieNestBDProvider.cs3",
         "name": "MovieNestBDProvider",
-        "jarHash": "sha256-72b9339918d6588b1c999e7ffdb7751f17518eca24351cecd3b99440ed159d67"
+        "jarHash": "sha256-01740ecb9589c461299e3e5a600128027e7e99bff2ef3f77b6a8f2c48150a7ff"
     },
     {
         "iconUrl": "https://www.google.com/s2/favicons?domain=www.youtube.com&sz=%size%",
