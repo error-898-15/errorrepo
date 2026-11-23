@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.LoadResponse.Companion.addTrailer
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.getQualityFromName
@@ -11,11 +12,12 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
-import java.net.URLDecoder
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 class MovieNestBDProvider : MainAPI() {
     override var mainUrl = "https://movienestbd.best"
@@ -31,6 +33,7 @@ class MovieNestBDProvider : MainAPI() {
     )
 
     private val mapper = jacksonObjectMapper()
+    private val hostCookieCache = ConcurrentHashMap<String, String>()
 
     private val defaultHeaders = mapOf(
         "User-Agent" to USER_AGENT,
@@ -46,16 +49,11 @@ class MovieNestBDProvider : MainAPI() {
     )
 
     private data class SourceSpec(
-        val url: String = "",
-        val label: String = "",
-        val quality: String = "",
-        val language: String = "",
-        val size: String = ""
-    )
-
-    private data class LoadPayload(
-        val pageUrl: String = "",
-        val sources: List<SourceSpec> = emptyList()
+        val url: String,
+        val label: String,
+        val quality: String,
+        val language: String,
+        val size: String
     )
 
     private data class EpisodeBucket(
@@ -63,6 +61,15 @@ class MovieNestBDProvider : MainAPI() {
         val episode: Int,
         var title: String,
         val sources: MutableList<SourceSpec>
+    )
+
+    private data class FetchedEmbed(
+        val finalUrl: String,
+        val body: String,
+        val contentType: String,
+        val cookie: String?,
+        val userAgent: String,
+        val interceptedStreams: List<String>
     )
 
     override val mainPage = mainPageOf(
@@ -139,13 +146,15 @@ class MovieNestBDProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val targetUrl = normalizeSiteUrl(url) ?: return null
-        val doc = try {
-            app.get(targetUrl, headers = defaultHeaders).document
+        val res = try {
+            app.get(targetUrl, headers = defaultHeaders)
         } catch (_: Exception) {
             return null
         }
 
-        val html = doc.html()
+        val html = res.text
+        if (html.isBlank()) return null
+        val doc = res.document
         val ldInfo = parseJsonLd(doc)
 
         val h1Title = doc.selectFirst("h1")?.text()?.trim()?.takeIf { it.isNotBlank() }
@@ -169,7 +178,8 @@ class MovieNestBDProvider : MainAPI() {
         val yearText = ldInfo.datePublished
             ?: doc.selectFirst("h1")?.parent()?.parent()?.text()
             ?: doc.title()
-        val parsedYear = Regex("""\b(19\d{2}|20\d{2})\b""").find(yearText)?.groupValues?.get(1)?.toIntOrNull()
+        val parsedYear = Regex("""\b(19\d{2}|20\d{2})\b""")
+            .find(yearText)?.groupValues?.get(1)?.toIntOrNull()
 
         val ratingText = doc.selectFirst("#display-rating-score")?.text()
             ?.substringBefore("/")?.trim()
@@ -235,13 +245,17 @@ class MovieNestBDProvider : MainAPI() {
                 movieSources.add(
                     SourceSpec(
                         url = movieWatchLink,
-                        label = "Main Stream"
+                        label = "Main Stream",
+                        quality = "",
+                        language = "",
+                        size = ""
                     )
                 )
             }
             rawLinks.forEach { entry ->
                 val link = entry.link.trim()
                 if (link.isBlank() || link == "#") return@forEach
+                if (isBatchOrZipName(entry.name)) return@forEach
                 movieSources.add(
                     SourceSpec(
                         url = link,
@@ -253,11 +267,9 @@ class MovieNestBDProvider : MainAPI() {
                 )
             }
 
-            val payloadJson = mapper.writeValueAsString(
-                LoadPayload(
-                    pageUrl = targetUrl,
-                    sources = movieSources.distinctBy { it.url }
-                )
+            val payloadJson = encodePayload(
+                pageUrl = targetUrl,
+                sources = movieSources.distinctBy { it.url }
             )
 
             val movieType = if (isAnime) TvType.AnimeMovie else TvType.Movie
@@ -296,10 +308,8 @@ class MovieNestBDProvider : MainAPI() {
                     title = cleanTitle,
                     sources = mutableListOf(source)
                 )
-            } else {
-                if (existing.sources.none { it.url == source.url }) {
-                    existing.sources.add(source)
-                }
+            } else if (existing.sources.none { it.url == source.url }) {
+                existing.sources.add(source)
             }
         }
 
@@ -334,13 +344,11 @@ class MovieNestBDProvider : MainAPI() {
         val episodes = buckets.values
             .sortedWith(compareBy<EpisodeBucket> { it.season }.thenBy { it.episode })
             .map { bucket ->
-                val epPayload = mapper.writeValueAsString(
-                    LoadPayload(
-                        pageUrl = targetUrl,
-                        sources = bucket.sources.distinctBy { it.url }
-                    )
+                val epPayload = encodePayload(
+                    pageUrl = targetUrl,
+                    sources = bucket.sources.distinctBy { it.url }
                 )
-                newEpisode(epPayload) {
+                newEpisode(url = epPayload, fix = false) {
                     this.name = bucket.title
                     this.season = bucket.season
                     this.episode = bucket.episode
@@ -380,26 +388,16 @@ class MovieNestBDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val payload = try {
-            mapper.readValue(data, LoadPayload::class.java)
-        } catch (_: Exception) {
-            val clean = data.trim()
-            if (clean.isEmpty()) return false
-            LoadPayload(
-                pageUrl = mainUrl,
-                sources = listOf(SourceSpec(url = clean, label = "Stream"))
-            )
-        }
+        val (pageUrl, sources) = decodePayload(data)
+        if (sources.isEmpty()) return false
 
-        if (payload.sources.isEmpty()) return false
-
-        val referer = payload.pageUrl.ifBlank { "$mainUrl/" }
+        val referer = pageUrl.ifBlank { "$mainUrl/" }
         val seenPlayers = mutableSetOf<String>()
         val seenStreams = mutableSetOf<String>()
         val seenSubtitles = mutableSetOf<String>()
         var foundAny = false
 
-        for (source in payload.sources) {
+        for (source in sources) {
             val resolvedPlayerUrls = resolveToPlayerCandidates(source.url, referer)
             for (candidateUrl in resolvedPlayerUrls) {
                 if (!seenPlayers.add(candidateUrl)) continue
@@ -429,7 +427,6 @@ class MovieNestBDProvider : MainAPI() {
         val absolute = normalizeUrl(trimmed, mainUrl) ?: return emptyList()
         val candidates = mutableListOf<String>()
 
-        // Case 1: Already /player/<24-char-id> or jiofiles embed URL
         val jioMatch = Regex("""/([a-zA-Z0-9]{24})(?:$|/|\?)""").find(absolute)
         if (jioMatch != null && (
                 absolute.contains("/player/", ignoreCase = true) ||
@@ -443,7 +440,6 @@ class MovieNestBDProvider : MainAPI() {
             return candidates
         }
 
-        // Case 2: /file/<base64_token> -> decode first segment to get 24-hex FILE_ID -> /player/<FILE_ID>
         val fileTokenMatch = Regex("""/file/([A-Za-z0-9_-]+)""").find(absolute)
         if (fileTokenMatch != null) {
             val token = fileTokenMatch.groupValues[1]
@@ -453,7 +449,6 @@ class MovieNestBDProvider : MainAPI() {
                 candidates.add("$mainUrl/player/$fileId")
             }
 
-            // Fallback: fetch /file/<token> page and resolve /file/<FILE_ID>/download?token=<DL_TOKEN>&mode=stream
             try {
                 val fileHtml = app.get(
                     absolute,
@@ -491,18 +486,19 @@ class MovieNestBDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Handle MovieNestBD /player/<id> wrapper page
         if (candidateUrl.contains("/player/", ignoreCase = true)) {
-            val playerHtml = try {
+            val res = try {
                 app.get(
                     candidateUrl,
                     headers = defaultHeaders + ("Referer" to referer)
-                ).text
+                )
             } catch (_: Exception) {
                 return false
             }
 
-            val playerDoc = org.jsoup.Jsoup.parse(playerHtml, candidateUrl)
+            if (res.code !in 200..299) return false
+            val playerHtml = res.text
+            val playerDoc = Jsoup.parse(playerHtml, candidateUrl)
             val iframeSrcs = buildList {
                 playerDoc.select("iframe[src]").forEach { el ->
                     normalizeUrl(el.attr("src"), candidateUrl)?.let { add(it) }
@@ -552,51 +548,63 @@ class MovieNestBDProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Resolve redirects to reach final host (e.g. mn.xcloud.asia -> xcloud1.space -> stream.xcloud1.sbs)
-        val response = try {
-            app.get(
-                embedUrl,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to referer
-                ),
-                allowRedirects = true
-            )
-        } catch (_: Exception) {
+        val fetched = fetchEmbedWithCloudflareBypass(embedUrl, referer)
+        if (fetched == null) {
             return loadExtractor(embedUrl, referer, subtitleCallback, callback)
         }
 
-        val finalUrl = response.url.ifBlank { embedUrl }
-        val body = response.text
-
-        if (body.contains("__XCLOUD_PLAYER__")) {
-            return extractXcloudPlayer(
-                pageUrl = finalUrl,
-                html = body,
+        if (fetched.body.contains("__XCLOUD_PLAYER__")) {
+            val ok = extractXcloudPlayer(
+                pageUrl = fetched.finalUrl,
+                html = fetched.body,
+                cookie = fetched.cookie,
+                userAgent = fetched.userAgent,
                 source = source,
                 seenStreams = seenStreams,
                 seenSubtitles = seenSubtitles,
                 subtitleCallback = subtitleCallback,
                 callback = callback
             )
+            if (ok) return true
         }
 
-        // If it's a direct media file URL
-        val ct = (response.headers["Content-Type"] ?: response.headers["content-type"]).orEmpty()
+        if (fetched.interceptedStreams.isNotEmpty()) {
+            var emittedIntercepted = false
+            for (streamUrl in fetched.interceptedStreams) {
+                if (seenStreams.add(streamUrl)) {
+                    val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+                    callback(
+                        newExtractorLink(
+                            source = name,
+                            name = buildSourceLabel(source, "Player"),
+                            url = streamUrl,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = extractOrigin(fetched.finalUrl)?.let { "$it/" } ?: referer
+                            this.quality = parseQualityFromText(source.quality)
+                        }
+                    )
+                    emittedIntercepted = true
+                }
+            }
+            if (emittedIntercepted) return true
+        }
+
+        val ct = fetched.contentType
         if (ct.startsWith("video/", ignoreCase = true) ||
             ct.contains("mpegurl", ignoreCase = true) ||
-            finalUrl.contains(".m3u8", ignoreCase = true) ||
-            finalUrl.contains(".mp4", ignoreCase = true) ||
-            finalUrl.contains(".mkv", ignoreCase = true)
+            fetched.finalUrl.contains(".m3u8", ignoreCase = true) ||
+            fetched.finalUrl.contains(".mp4", ignoreCase = true) ||
+            fetched.finalUrl.contains(".mkv", ignoreCase = true)
         ) {
-            if (seenStreams.add(finalUrl)) {
+            if (seenStreams.add(fetched.finalUrl)) {
                 val isM3u8 = ct.contains("mpegurl", ignoreCase = true) ||
-                    finalUrl.contains(".m3u8", ignoreCase = true)
+                    fetched.finalUrl.contains(".m3u8", ignoreCase = true)
                 callback(
                     newExtractorLink(
                         source = name,
                         name = buildSourceLabel(source, "Direct"),
-                        url = finalUrl,
+                        url = fetched.finalUrl,
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = referer
@@ -607,12 +615,212 @@ class MovieNestBDProvider : MainAPI() {
             }
         }
 
-        return loadExtractor(finalUrl, referer, subtitleCallback, callback)
+        return loadExtractor(fetched.finalUrl, referer, subtitleCallback, callback)
+    }
+
+    private suspend fun fetchEmbedWithCloudflareBypass(
+        startUrl: String,
+        initialReferer: String
+    ): FetchedEmbed? {
+        var currentUrl = startUrl
+        var currentReferer = initialReferer
+        val collectedIntercepts = mutableListOf<String>()
+
+        for (hop in 0 until 6) {
+            val host = extractHost(currentUrl)
+            val cachedCookie = getBestCookie(currentUrl, host)
+            val ua = if (!cachedCookie.isNullOrBlank()) {
+                WebViewResolver.webViewUserAgent ?: USER_AGENT
+            } else {
+                USER_AGENT
+            }
+            val headers = buildMap {
+                put("User-Agent", ua)
+                put("Referer", currentReferer)
+                put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                if (!cachedCookie.isNullOrBlank()) {
+                    put("Cookie", cachedCookie)
+                }
+            }
+
+            val res = try {
+                app.get(currentUrl, headers = headers, allowRedirects = false)
+            } catch (_: Exception) {
+                null
+            }
+
+            if (res != null && res.code in 300..399) {
+                val loc = (res.headers["Location"] ?: res.headers["location"])?.trim()
+                val nextUrl = normalizeUrl(loc, extractOrigin(currentUrl) ?: currentUrl)
+                if (!nextUrl.isNullOrBlank() && nextUrl != currentUrl) {
+                    currentReferer = currentUrl
+                    currentUrl = nextUrl
+                    continue
+                }
+            }
+
+            val needsChallenge = res == null ||
+                res.code == 403 ||
+                res.code == 503 ||
+                isCloudflareChallengeResponse(res.headers["Cf-Mitigated"] ?: res.headers["cf-mitigated"], res.text)
+
+            if (!needsChallenge && res != null && res.code in 200..299) {
+                val ct = (res.headers["Content-Type"] ?: res.headers["content-type"]).orEmpty()
+                return FetchedEmbed(
+                    finalUrl = res.url.ifBlank { currentUrl },
+                    body = res.text,
+                    contentType = ct,
+                    cookie = cachedCookie,
+                    userAgent = ua,
+                    interceptedStreams = collectedIntercepts.distinct()
+                )
+            }
+
+            // Solve Cloudflare challenge via WebViewResolver
+            val solved = solveCloudflareWithWebView(currentUrl)
+            if (solved.interceptedStreams.isNotEmpty()) {
+                collectedIntercepts.addAll(solved.interceptedStreams)
+            }
+
+            val targetAfterSolve = solved.unlockedPageUrl ?: currentUrl
+            val solvedHost = extractHost(targetAfterSolve)
+            val solvedCookie = solved.cookie ?: getBestCookie(targetAfterSolve, solvedHost)
+            val solvedUa = WebViewResolver.webViewUserAgent ?: USER_AGENT
+
+            if (!solvedCookie.isNullOrBlank() || solved.unlockedPageUrl != null) {
+                val retryHeaders = buildMap {
+                    put("User-Agent", solvedUa)
+                    put("Referer", currentReferer)
+                    put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    if (!solvedCookie.isNullOrBlank()) {
+                        put("Cookie", solvedCookie)
+                    }
+                }
+                val retryRes = try {
+                    app.get(targetAfterSolve, headers = retryHeaders, allowRedirects = true)
+                } catch (_: Exception) {
+                    null
+                }
+                if (retryRes != null && retryRes.code in 200..299 &&
+                    !isCloudflareChallengeResponse(
+                        retryRes.headers["Cf-Mitigated"] ?: retryRes.headers["cf-mitigated"],
+                        retryRes.text
+                    )
+                ) {
+                    val ct = (retryRes.headers["Content-Type"] ?: retryRes.headers["content-type"]).orEmpty()
+                    return FetchedEmbed(
+                        finalUrl = retryRes.url.ifBlank { targetAfterSolve },
+                        body = retryRes.text,
+                        contentType = ct,
+                        cookie = solvedCookie,
+                        userAgent = solvedUa,
+                        interceptedStreams = collectedIntercepts.distinct()
+                    )
+                }
+            }
+
+            if (collectedIntercepts.isNotEmpty()) {
+                return FetchedEmbed(
+                    finalUrl = targetAfterSolve,
+                    body = "",
+                    contentType = "",
+                    cookie = solvedCookie,
+                    userAgent = solvedUa,
+                    interceptedStreams = collectedIntercepts.distinct()
+                )
+            }
+            break
+        }
+
+        return null
+    }
+
+    private data class WebViewSolveResult(
+        val unlockedPageUrl: String? = null,
+        val cookie: String? = null,
+        val interceptedStreams: List<String> = emptyList()
+    )
+
+    private suspend fun solveCloudflareWithWebView(targetUrl: String): WebViewSolveResult {
+        val targetHost = extractHost(targetUrl)
+        val oldCookie = getBestCookie(targetUrl, targetHost)
+        if (targetHost != null) hostCookieCache.remove(targetHost)
+
+        var unlockedPageUrl: String? = null
+        var solvedCookie: String? = null
+        val interceptedStreams = mutableListOf<String>()
+
+        val resolver = WebViewResolver(
+            interceptUrl = Regex(".^"),
+            additionalUrls = listOf(Regex(".")),
+            userAgent = null,
+            useOkhttp = false,
+            timeout = 25_000L
+        )
+
+        try {
+            resolver.resolveUsingWebView(url = targetUrl) { req ->
+                val reqUrl = req.url.toString()
+                val reqHost = req.url.host
+
+                val cookieForReq = getWebViewCookie(reqUrl)
+                if (!cookieForReq.isNullOrBlank() && cookieForReq.contains("cf_clearance")) {
+                    hostCookieCache[reqHost] = cookieForReq
+                    solvedCookie = cookieForReq
+                }
+
+                if (isDirectMediaStreamUrl(reqUrl)) {
+                    synchronized(interceptedStreams) {
+                        if (!interceptedStreams.contains(reqUrl)) {
+                            interceptedStreams.add(reqUrl)
+                        }
+                    }
+                    return@resolveUsingWebView true
+                }
+
+                if (reqUrl.contains("/public/js/player.js", ignoreCase = true) ||
+                    reqUrl.contains("/public/css/player.css", ignoreCase = true) ||
+                    reqUrl.contains("/apis/cloud", ignoreCase = true)
+                ) {
+                    val reqOrigin = extractOrigin(reqUrl)
+                    val pathId = Regex("""/(?:stream_)?([a-f0-9]{10,24})""", RegexOption.IGNORE_CASE)
+                        .find(targetUrl)?.groupValues?.get(1)
+                    if (reqOrigin != null && pathId != null) {
+                        unlockedPageUrl = "$reqOrigin/$pathId"
+                    }
+                    val streamHostCookie = getWebViewCookie(reqUrl)
+                    if (!streamHostCookie.isNullOrBlank() && streamHostCookie.contains("cf_clearance")) {
+                        hostCookieCache[reqHost] = streamHostCookie
+                        solvedCookie = streamHostCookie
+                    }
+                    return@resolveUsingWebView true
+                }
+
+                val freshTargetCookie = getWebViewCookie(targetUrl)
+                !freshTargetCookie.isNullOrBlank() &&
+                    freshTargetCookie.contains("cf_clearance") &&
+                    (oldCookie == null || !oldCookie.contains("cf_clearance") || freshTargetCookie != oldCookie) &&
+                    !reqHost.contains("xcloud1.space", ignoreCase = true)
+            }
+        } catch (_: Exception) {
+        }
+
+        val finalCookie = solvedCookie
+            ?: unlockedPageUrl?.let { getWebViewCookie(it) }
+            ?: getWebViewCookie(targetUrl)
+
+        return WebViewSolveResult(
+            unlockedPageUrl = unlockedPageUrl,
+            cookie = finalCookie,
+            interceptedStreams = interceptedStreams.distinct()
+        )
     }
 
     private suspend fun extractXcloudPlayer(
         pageUrl: String,
         html: String,
+        cookie: String?,
+        userAgent: String,
         source: SourceSpec,
         seenStreams: MutableSet<String>,
         seenSubtitles: MutableSet<String>,
@@ -673,19 +881,20 @@ class MovieNestBDProvider : MainAPI() {
             }
         }
 
-        // 3. Worker pool (/api/encode) -> fast multi-quality MP4 or HLS streams
+        // 3. Worker pool (/api/encode) -> multi-quality MP4 or HLS streams
         val encodedDriveId = cfg.path("encodedDriveId").asText("").takeIf {
             it.isNotBlank() && !it.equals("null", ignoreCase = true)
         }
         val isSafeFilename = cfg.path("isSafeFilename").asBoolean(true)
         val workerPools = cfg.path("workerPools")
         if (isSafeFilename && encodedDriveId != null && workerPools.isArray && workerPools.size() > 0) {
-            val payloadMap = mutableMapOf<String, Any>("driveid" to encodedDriveId)
+            val payloadObj = mapper.createObjectNode()
+            payloadObj.put("driveid", encodedDriveId)
             val audiosNode = cfg.path("audios")
             if (audiosNode.isArray && audiosNode.size() > 0) {
-                payloadMap["audios"] = audiosNode
+                payloadObj.set<JsonNode>("audios", audiosNode)
             }
-            val jsonBody = mapper.writeValueAsString(payloadMap)
+            val jsonBody = mapper.writeValueAsString(payloadObj)
             val mediaType = "application/json; charset=utf-8".toMediaType()
 
             for (i in 0 until minOf(workerPools.size(), 3)) {
@@ -695,7 +904,7 @@ class MovieNestBDProvider : MainAPI() {
                     app.post(
                         "$workerBase/api/encode",
                         headers = mapOf(
-                            "User-Agent" to USER_AGENT,
+                            "User-Agent" to userAgent,
                             "Origin" to origin,
                             "Referer" to "$origin/"
                         ),
@@ -767,7 +976,7 @@ class MovieNestBDProvider : MainAPI() {
             val redirPath = rawRedir.trim()
             if (redirPath.isBlank() || redirPath.equals("null", ignoreCase = true)) continue
             val redirUrl = normalizeUrl(redirPath, origin) ?: continue
-            val resolvedR2 = resolveRedirectLocation(redirUrl, pageUrl) ?: continue
+            val resolvedR2 = resolveRedirectLocation(redirUrl, pageUrl, cookie, userAgent) ?: continue
             if (seenStreams.add(resolvedR2)) {
                 callback(
                     newExtractorLink(
@@ -786,14 +995,23 @@ class MovieNestBDProvider : MainAPI() {
         return emitted
     }
 
-    private suspend fun resolveRedirectLocation(url: String, referer: String): String? {
+    private suspend fun resolveRedirectLocation(
+        url: String,
+        referer: String,
+        cookie: String?,
+        userAgent: String
+    ): String? {
         return try {
+            val headers = buildMap {
+                put("User-Agent", userAgent)
+                put("Referer", referer)
+                if (!cookie.isNullOrBlank()) {
+                    put("Cookie", cookie)
+                }
+            }
             val res = app.get(
                 url,
-                headers = mapOf(
-                    "User-Agent" to USER_AGENT,
-                    "Referer" to referer
-                ),
+                headers = headers,
                 allowRedirects = false
             )
             val loc = (res.headers["Location"] ?: res.headers["location"])?.trim()
@@ -809,6 +1027,114 @@ class MovieNestBDProvider : MainAPI() {
         }
     }
 
+    private fun isCloudflareChallengeResponse(cfMitigated: String?, body: String): Boolean {
+        if (!cfMitigated.isNullOrBlank() && cfMitigated.contains("challenge", ignoreCase = true)) {
+            return true
+        }
+        return body.contains("<title>Just a moment...</title>", ignoreCase = true) ||
+            body.contains("_cf_chl_opt")
+    }
+
+    private fun isDirectMediaStreamUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("r2.cloudflarestorage.com/") ||
+            lower.contains(".workers.dev/stream/") ||
+            lower.contains(".m3u8")
+    }
+
+    private fun getBestCookie(url: String, host: String?): String? {
+        if (host != null) {
+            hostCookieCache[host]?.takeIf { it.contains("cf_clearance") }?.let { return it }
+        }
+        val wvCookie = getWebViewCookie(url)?.takeIf { it.contains("cf_clearance") }
+        if (wvCookie != null && host != null) {
+            hostCookieCache[host] = wvCookie
+        }
+        return wvCookie
+    }
+
+    private fun getWebViewCookie(url: String): String? {
+        return try {
+            val cmClass = Class.forName("android.webkit.CookieManager")
+            val instance = cmClass.getMethod("getInstance").invoke(null) ?: return null
+            cmClass.getMethod("getCookie", String::class.java).invoke(instance, url) as? String
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun encodePayload(pageUrl: String, sources: List<SourceSpec>): String {
+        val root = mapper.createObjectNode()
+        root.put("pageUrl", pageUrl)
+        val arr = mapper.createArrayNode()
+        sources.forEach { src ->
+            val obj = mapper.createObjectNode()
+            obj.put("u", src.url)
+            obj.put("n", src.label)
+            obj.put("q", src.quality)
+            obj.put("l", src.language)
+            obj.put("s", src.size)
+            arr.add(obj)
+        }
+        root.set<JsonNode>("sources", arr)
+        return mapper.writeValueAsString(root)
+    }
+
+    private fun decodePayload(data: String): Pair<String, List<SourceSpec>> {
+        var clean = data.trim()
+        val jsonStart = Regex("""^https?://[^/]+/(?=[\{\[])""").find(clean)
+        if (jsonStart != null) {
+            clean = clean.substring(jsonStart.range.last + 1)
+        }
+
+        if (clean.startsWith("{")) {
+            try {
+                val root = mapper.readTree(clean)
+                val pageUrl = root.path("pageUrl").asText("").trim()
+                val sourcesNode = root.path("sources")
+                val list = mutableListOf<SourceSpec>()
+                if (sourcesNode.isArray) {
+                    for (node in sourcesNode) {
+                        val url = node.path("u").asText("").ifBlank {
+                            node.path("url").asText("")
+                        }.trim()
+                        if (url.isEmpty()) continue
+                        list.add(
+                            SourceSpec(
+                                url = url,
+                                label = node.path("n").asText("").ifBlank {
+                                    node.path("label").asText("")
+                                },
+                                quality = node.path("q").asText("").ifBlank {
+                                    node.path("quality").asText("")
+                                },
+                                language = node.path("l").asText("").ifBlank {
+                                    node.path("language").asText("")
+                                },
+                                size = node.path("s").asText("").ifBlank {
+                                    node.path("size").asText("")
+                                }
+                            )
+                        )
+                    }
+                }
+                return pageUrl to list
+            } catch (_: Exception) {
+            }
+        }
+
+        if (clean.isEmpty()) return "" to emptyList()
+        return mainUrl to listOf(
+            SourceSpec(
+                url = clean,
+                label = "Stream",
+                quality = "",
+                language = "",
+                size = ""
+            )
+        )
+    }
+
     private fun parseCardGrid(doc: Document): List<SearchResponse> {
         return doc.select("a.movie-card")
             .mapNotNull { parseMovieCard(it) }
@@ -821,7 +1147,8 @@ class MovieNestBDProvider : MainAPI() {
 
         val h3 = card.selectFirst("h3")
         val yearText = h3?.selectFirst("span")?.text()?.trim().orEmpty()
-        val yearVal = Regex("""\b(19\d{2}|20\d{2})\b""").find(yearText)?.groupValues?.get(1)?.toIntOrNull()
+        val yearVal = Regex("""\b(19\d{2}|20\d{2})\b""")
+            .find(yearText)?.groupValues?.get(1)?.toIntOrNull()
 
         val titleFromH3 = h3?.ownText()?.trim()?.takeIf { it.isNotBlank() }
             ?: h3?.text()?.replace(yearText, "")?.trim()?.takeIf { it.isNotBlank() }
@@ -1159,6 +1486,14 @@ class MovieNestBDProvider : MainAPI() {
             val scheme = uri.scheme ?: return null
             val host = uri.host ?: return null
             if (uri.port > 0) "$scheme://$host:${uri.port}" else "$scheme://$host"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractHost(url: String): String? {
+        return try {
+            URI(url).host?.lowercase()
         } catch (_: Exception) {
             null
         }
