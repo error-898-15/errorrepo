@@ -348,7 +348,8 @@ class MovieNestBDProvider : MainAPI() {
                     pageUrl = targetUrl,
                     sources = bucket.sources.distinctBy { it.url }
                 )
-                newEpisode(url = epPayload, fix = false) {
+                newEpisode(epPayload) {
+                    this.data = epPayload
                     this.name = bucket.title
                     this.season = bucket.season
                     this.episode = bucket.episode
@@ -634,7 +635,7 @@ class MovieNestBDProvider : MainAPI() {
             } else {
                 USER_AGENT
             }
-            val headers = buildMap {
+            val headers = buildMap<String, String> {
                 put("User-Agent", ua)
                 put("Referer", currentReferer)
                 put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -688,7 +689,7 @@ class MovieNestBDProvider : MainAPI() {
             val solvedUa = WebViewResolver.webViewUserAgent ?: USER_AGENT
 
             if (!solvedCookie.isNullOrBlank() || solved.unlockedPageUrl != null) {
-                val retryHeaders = buildMap {
+                val retryHeaders = buildMap<String, String> {
                     put("User-Agent", solvedUa)
                     put("Referer", currentReferer)
                     put("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -775,10 +776,8 @@ class MovieNestBDProvider : MainAPI() {
                             interceptedStreams.add(reqUrl)
                         }
                     }
-                    return@resolveUsingWebView true
-                }
-
-                if (reqUrl.contains("/public/js/player.js", ignoreCase = true) ||
+                    true
+                } else if (reqUrl.contains("/public/js/player.js", ignoreCase = true) ||
                     reqUrl.contains("/public/css/player.css", ignoreCase = true) ||
                     reqUrl.contains("/apis/cloud", ignoreCase = true)
                 ) {
@@ -793,14 +792,14 @@ class MovieNestBDProvider : MainAPI() {
                         hostCookieCache[reqHost] = streamHostCookie
                         solvedCookie = streamHostCookie
                     }
-                    return@resolveUsingWebView true
+                    true
+                } else {
+                    val freshTargetCookie = getWebViewCookie(targetUrl)
+                    !freshTargetCookie.isNullOrBlank() &&
+                        freshTargetCookie.contains("cf_clearance") &&
+                        (oldCookie == null || !oldCookie.contains("cf_clearance") || freshTargetCookie != oldCookie) &&
+                        !reqHost.contains("xcloud1.space", ignoreCase = true)
                 }
-
-                val freshTargetCookie = getWebViewCookie(targetUrl)
-                !freshTargetCookie.isNullOrBlank() &&
-                    freshTargetCookie.contains("cf_clearance") &&
-                    (oldCookie == null || !oldCookie.contains("cf_clearance") || freshTargetCookie != oldCookie) &&
-                    !reqHost.contains("xcloud1.space", ignoreCase = true)
             }
         } catch (_: Exception) {
         }
@@ -945,7 +944,9 @@ class MovieNestBDProvider : MainAPI() {
                 if (videoObj.isObject) {
                     val fields = videoObj.fields()
                     while (fields.hasNext()) {
-                        val (qKey, qVal) = fields.next()
+                        val entry = fields.next()
+                        val qKey = entry.key
+                        val qVal = entry.value
                         val streamUrl = qVal.asText("").trim()
                         if (streamUrl.startsWith("http", ignoreCase = true) && seenStreams.add(streamUrl)) {
                             callback(
@@ -1002,7 +1003,7 @@ class MovieNestBDProvider : MainAPI() {
         userAgent: String
     ): String? {
         return try {
-            val headers = buildMap {
+            val headers = buildMap<String, String> {
                 put("User-Agent", userAgent)
                 put("Referer", referer)
                 if (!cookie.isNullOrBlank()) {
